@@ -1,6 +1,7 @@
 """argparse wiring + command handlers + main()."""
 
 import argparse
+import json
 import sys
 
 from . import __version__
@@ -10,6 +11,33 @@ from .http import get_auth
 from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
+from .varschema import resolve_variables
+
+
+def _parse_vars(pairs) -> dict:
+    """Parse repeated --var KEY=VALUE into a dict (later wins)."""
+    out = {}
+    for item in pairs or []:
+        if "=" not in item:
+            raise RepipeError(
+                f"--var must be KEY=VALUE, got '{item}'.", EXIT_CONFIG
+            )
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise RepipeError(f"--var has an empty key: '{item}'.", EXIT_CONFIG)
+        out[key] = value
+    return out
+
+
+def _find_target(targets, name):
+    for t in targets:
+        if t.name == name:
+            return t
+    available = ", ".join(t.name for t in targets) or "(none)"
+    raise RepipeError(
+        f"pipeline '{name}' not found. Available: {available}", EXIT_CONFIG
+    )
 
 
 def cmd_list(args) -> int:
@@ -78,6 +106,49 @@ def cmd_logs(args) -> int:
     return EXIT_OK
 
 
+def cmd_run(args) -> int:
+    host, workspace, repo, branch = detect_repo(args.path)
+    if args.repo:
+        if "/" not in args.repo:
+            raise RepipeError("--repo must be <workspace>/<repo>.", EXIT_CONFIG)
+        workspace, repo = args.repo.split("/", 1)
+    provider = choose_provider(host, args.provider)(workspace, repo)
+
+    targets = provider.parse_targets(args.path)
+    target = _find_target(targets, args.pipeline)
+
+    ref = args.branch or branch
+    if not ref:
+        raise RepipeError(
+            "no branch to run against — pass -b/--branch (couldn't detect a "
+            "current branch).",
+            EXIT_CONFIG,
+        )
+
+    provided = _parse_vars(args.var)
+    variables = resolve_variables(target, provided)  # fail-fast validation
+
+    method, url, body = provider.trigger_request(target.name, ref, variables)
+
+    if args.dry_run:
+        print("DRY RUN — no request sent\n")
+        print(f"{method} {url}")
+        print(json.dumps(body, indent=2, ensure_ascii=False))
+        print(f"\n(pipeline '{target.name}' [{target.env}] on branch '{ref}')")
+        return EXIT_OK
+
+    auth = get_auth(required=True)
+    run = provider.trigger(target.name, ref, variables, auth)
+    print(f"➜ triggered {target.name} on {ref}")
+    if run.number is not None:
+        print(f"  build:  #{run.number}")
+    print(f"  state:  {run.native_state or run.state}")
+    if run.web_url:
+        print(f"  url:    {run.web_url}")
+    print("\n(watch/retry lands in phase 3 — this only triggers for now)")
+    return EXIT_OK
+
+
 def _not_yet(command: str, phase: int) -> int:
     print(
         f"repipe: `{command}` is not implemented yet (lands in phase {phase}).",
@@ -118,8 +189,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_logs.add_argument("--all", action="store_true",
                         help="show all steps, not just failed ones")
 
+    p_run = sub.add_parser("run", parents=[common],
+                           help="trigger a pipeline (watch/retry lands in phase 3)")
+    p_run.add_argument("-p", "--pipeline", required=True,
+                       help="pipeline name (see `repipe list`)")
+    p_run.add_argument("-b", "--branch", default=None,
+                       help="branch ref (default: current branch)")
+    p_run.add_argument("-r", "--repo", default=None,
+                       help="override detected repo as <workspace>/<repo>")
+    p_run.add_argument("--var", action="append", metavar="KEY=VALUE",
+                       help="set a pipeline variable (repeatable)")
+    p_run.add_argument("--dry-run", action="store_true",
+                       help="print the exact request without calling the API")
+    p_run.add_argument("--yes", "--non-interactive", dest="yes",
+                       action="store_true", help="disable prompts (CI/scripting)")
+
     # Still stubbed — implemented in later phases.
-    sub.add_parser("run", help="[phase 2] trigger a pipeline and watch/retry it")
     sub.add_parser("init", help="[phase 4] scaffold config from the repo")
     sub.add_parser("rerun", help="[phase 4] repeat the last invocation")
 
@@ -145,7 +230,7 @@ def main(argv=None) -> int:
         if args.command == "logs":
             return cmd_logs(args)
         if args.command == "run":
-            return _not_yet("run", 2)
+            return cmd_run(args)
         if args.command in ("init", "rerun"):
             return _not_yet(args.command, 4)
     except RepipeError as e:

@@ -4,7 +4,7 @@ import os
 import urllib.parse
 
 from ..errors import RepipeError, EXIT_CONFIG
-from ..http import api_get_json, api_get_text
+from ..http import api_get_json, api_get_text, api_post_json
 from ..model import Run, RunState, Step
 from ..ymlparse import parse_pipelines_yml
 from .base import Provider
@@ -37,6 +37,26 @@ class BitbucketProvider(Provider):
             )
         with open(path, "r", encoding="utf-8") as f:
             return parse_pipelines_yml(f.read())
+
+    def trigger_request(self, target_name: str, ref_name: str, variables: list):
+        body = {
+            "target": {
+                "type": "pipeline_ref_target",
+                "ref_type": "branch",
+                "ref_name": ref_name,
+                "selector": {"type": "custom", "pattern": target_name},
+            },
+            "variables": [
+                {"key": k, "value": v, "secured": False} for k, v in variables
+            ],
+        }
+        return "POST", f"{self._base()}/pipelines/", body
+
+    def trigger(self, target_name: str, ref_name: str, variables: list, auth) -> Run:
+        _, url, body = self.trigger_request(target_name, ref_name, variables)
+        pj = api_post_json(url, body, auth)
+        uuid = pj.get("uuid") or ""
+        return self._run_from_json(uuid, pj)
 
     def _map_state(self, pipeline_json: dict):
         st = pipeline_json.get("state", {}) or {}

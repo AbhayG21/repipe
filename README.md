@@ -25,28 +25,73 @@ bash install.sh
 
 ## Authentication
 
-repipe uses a **Bitbucket Access Token** (a machine credential bound to a repo/workspace, not a person) sent as `Authorization: Bearer`.
+repipe needs a Bitbucket credential. There are two supported kinds — pick whichever you can create. **The token never goes in a file** — you set it as an environment variable and repipe reads it at runtime.
 
-1. Create a token with **Pipelines: read + write** — Repo settings → *Access tokens*, or Workspace settings → *Access tokens*.
-   <https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/>
-2. Export it (add to `~/.zshrc` to persist):
+### Option A — Atlassian API token (works without admin) ✅ verified
+
+Any Bitbucket user can create this for their own account; no repo/workspace admin needed. It authenticates via HTTP **Basic** auth (email + token). This is what we used to run the first live QA pipeline.
+
+1. Go to **<https://id.atlassian.com/manage-profile/security/api-tokens>** → **Create API token with scopes**.
+2. Select the Bitbucket scopes:
+   - `read:pipeline:bitbucket` — read runs/steps/logs (`status`, `logs`)
+   - `write:pipeline:bitbucket` — start runs (`run`)
+   - `read:repository:bitbucket` — so run/repo lookups resolve cleanly
+3. Export your **email** and the token (repipe falls back to Basic auth when `REPIPE_TOKEN` is unset):
    ```bash
-   export REPIPE_TOKEN=<your-access-token>
+   export REPIPE_EMAIL="you@yourcompany.com"
+   export REPIPE_API_TOKEN="<the-api-token>"
    ```
 
-Never commit tokens. `config.toml` is for non-secret defaults only.
+### Option B — Bitbucket Access token (needs admin)
+
+A machine credential bound to a repo/workspace (not a person), sent as `Authorization: Bearer`. Preferred for shared automation, but creating one requires admin on the repo/workspace.
+
+1. Repo settings → *Access tokens* (or Workspace settings → *Access tokens*), scopes **Pipelines: read + write**.
+   <https://support.atlassian.com/bitbucket-cloud/docs/access-tokens/>
+2. Export it:
+   ```bash
+   export REPIPE_TOKEN="<your-access-token>"
+   ```
+
+> **App passwords are not supported** — they're end-of-life. Use one of the above.
+
+### Verify your credential
+
+Confirm auth without triggering anything — a read-only call:
+
+```bash
+cd /path/to/your/repo-clone
+repipe status <a-recent-build-number>
+```
+
+If it prints a real state, you're set. Common HTTP codes if you debug with `curl`: `200` = good; `401` = token rejected (wrong type/value — e.g. an API token used as Bearer); `403` = authenticated but missing a scope; `404` on the repo root usually means no `read:repository` scope (harmless — repipe only calls `/pipelines/…`).
+
+Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitignore` covers any `credentials` file.
 
 ## Usage
 
 ```bash
-repipe version      # print version                     ✅ available
-repipe --help       # full command list                 ✅ available
-repipe list         # list runnable pipelines           ⏳ phase 1
-repipe status <id>  # state of a run                     ⏳ phase 1
-repipe              # interactive trigger + retry        ⏳ phase 4
+repipe version                          # print version                    ✅
+repipe --help                           # full command list                ✅
+repipe list                             # list runnable pipelines           ✅
+repipe status <uuid|build#>             # state of a run                    ✅
+repipe logs   <uuid|build#> [--all]     # step logs of a run                ✅
+repipe run -p <PIPELINE> -b <branch>    # trigger a run (--dry-run to preview)  ✅
+repipe run ... --var KEY=VALUE          # set pipeline variables (repeatable)   ✅
+repipe                                  # interactive trigger + retry       ⏳ phase 4
 ```
 
-_Full usage and examples for `supply-core-new` will be filled in as phases land._
+`run` triggers today; **watch + auto-retry** land in phase 3. Example against `supply-core-new`:
+
+```bash
+# preview the exact API request without sending it
+repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May --dry-run
+
+# trigger for real → prints build number + web URL
+repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May
+```
+
+Bad or missing variables are caught locally in ~1s (before any API call), e.g. `Project` must be `PCI`/`NON-PCI`, and `MULTI=false` forbids space-separated `FLAVOURS`.
 
 ## Configuration
 
