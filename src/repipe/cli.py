@@ -163,9 +163,10 @@ def _prod_gate(target, args):
         raise RepipeError("prod confirmation did not match — aborted.", EXIT_CONFIG)
 
 
-def _finish_run(provider, target, ref, variables, args) -> int:
+def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
     """Shared trigger path: dry-run, prod gate, conservative prod retry,
     trigger, then watch/retry. Used by `run`, the interactive flow, and `rerun`.
+    `confirmed=True` skips the typed-name prod gate (caller already confirmed).
     """
     method, url, body = provider.trigger_request(target.name, ref, variables)
 
@@ -176,7 +177,8 @@ def _finish_run(provider, target, ref, variables, args) -> int:
         print(f"\n(pipeline '{target.name}' [{target.env}] on branch '{ref}')")
         return EXIT_OK
 
-    _prod_gate(target, args)
+    if not confirmed:
+        _prod_gate(target, args)
 
     # Conservative prod policy: low retry cap, built-in transient patterns only
     # (never custom --retry-on), unless --force.
@@ -323,6 +325,24 @@ def _run_args_namespace(**overrides):
     return argparse.Namespace(**d)
 
 
+def _ask_var(var, provided, rcfg, args, step):
+    """Prompt for a single pipeline variable; returns the value or interactive.BACK.
+    Uses any prior answer (from going back) as the default."""
+    name = var.name
+    prior = provided.get(name)
+    if name == "Project":
+        default_proj = prior or rcfg.get("default_project") or var.default or PROJECT_VALUES[0]
+        di = PROJECT_VALUES.index(default_proj) if default_proj in PROJECT_VALUES else 0
+        return interactive.pick("Project", PROJECT_VALUES, default_idx=di, step=step)
+    if var.allowed_values:
+        cur = prior if prior in var.allowed_values else var.default
+        di = var.allowed_values.index(cur) if cur in var.allowed_values else 0
+        return interactive.pick(name, var.allowed_values, default_idx=di, step=step)
+    if name == "FLAVOURS" and rcfg.get("flavours"):
+        print(interactive.dim("  recent: " + ", ".join(rcfg["flavours"][-5:])))
+    return interactive.ask(name, default=prior or var.default, step=step)
+
+
 def cmd_interactive(args) -> int:
     host, workspace, repo, branch = detect_repo(args.path)
     provider = choose_provider(host, args.provider)(workspace, repo)
@@ -334,79 +354,139 @@ def cmd_interactive(args) -> int:
     if not targets:
         raise RepipeError(f"no {provider.TARGET_WORD}s found in this repo.", EXIT_CONFIG)
 
-    print(f"{interactive.bold('repipe')} · {repo_key} "
-          f"{interactive.dim('(' + provider.NAME + ')')}\n")
+    interactive.banner(repo_key, provider.NAME, __version__)
 
-    # 1. pipeline
-    target = interactive.pick(
-        "Pipeline", targets,
-        to_str=lambda t: f"{t.name}  {interactive.env_badge(t.env)}",
-    )
+    st = {"provided": {}, "new_email": None, "vars_for": None, "total": 4}
 
-    # 2. env — inferred default, overridable
-    env_opts = ["qa", "prod"]
-    target.env = interactive.pick("Environment", env_opts,
-                                  default_idx=env_opts.index(target.env),
-                                  to_str=interactive.env_badge)
+    def total():
+        return st["total"]
 
-    # 3. branch — newest release-prefixed + current, or manual
-    prefix = rcfg.get(f"{target.env}_branch_prefix") or f"{target.env}-release"
-    cands = branch_candidates(args.path, branch, prefix)
-    options = cands + ["(enter manually)"]
-    picked = interactive.pick(f"Branch (prefix '{prefix}')", options,
-                              default_idx=0 if cands else len(options) - 1)
-    ref = interactive.ask("Branch name", default=branch) if picked == "(enter manually)" else picked
-    if not ref:
-        raise RepipeError("no branch selected.", EXIT_CONFIG)
+    def promptable(target):
+        out = []
+        for var in target.variables:
+            if var.name == "USEREMAIL" and (
+                cfg.get("user_email") or run_git(["config", "user.email"], args.path)
+            ):
+                continue
+            out.append(var)
+        return out
 
-    # 4. variables — prompt only what's needed
-    provided = {}
-    new_email = None
-    for var in target.variables:
-        if var.name == "USEREMAIL":
-            existing = cfg.get("user_email") or run_git(["config", "user.email"], args.path)
-            if existing:
-                provided[var.name] = existing
-                if not cfg.get("user_email"):
-                    new_email = existing
-            else:
-                provided[var.name] = new_email = interactive.ask("USEREMAIL")
-        elif var.name == "Project":
-            default_proj = rcfg.get("default_project") or var.default or PROJECT_VALUES[0]
-            di = PROJECT_VALUES.index(default_proj) if default_proj in PROJECT_VALUES else 0
-            provided[var.name] = interactive.pick("Project", PROJECT_VALUES, default_idx=di)
-        elif var.allowed_values:
-            di = var.allowed_values.index(var.default) if var.default in var.allowed_values else 0
-            provided[var.name] = interactive.pick(var.name, var.allowed_values, default_idx=di)
+    def step_pipeline():
+        di = targets.index(st["target"]) if st.get("target") in targets else 0
+        chosen = interactive.pick(
+            "Pipeline", targets, default_idx=di, allow_back=False, step=(1, total()),
+            to_str=lambda t: f"{t.name}  {interactive.env_badge(t.env)}",
+        )
+        if chosen is interactive.BACK:
+            return "back"
+        st["target"] = chosen
+        st.setdefault("env", chosen.env)
+        st["total"] = 5 if promptable(chosen) else 4
+        return "next"
+
+    def step_env():
+        opts = ["qa", "prod"]
+        cur = st.get("env", st["target"].env)
+        chosen = interactive.pick("Environment", opts, default_idx=opts.index(cur),
+                                  to_str=interactive.env_badge, step=(2, total()))
+        if chosen is interactive.BACK:
+            return "back"
+        st["env"] = chosen
+        st["target"].env = chosen
+        return "next"
+
+    def step_branch():
+        prefix = rcfg.get(f"{st['env']}_branch_prefix") or f"{st['env']}-release"
+        cands = branch_candidates(args.path, branch, prefix)
+        options = cands + ["enter manually…"]
+        di = options.index(st["ref"]) if st.get("ref") in options else 0
+        chosen = interactive.pick("Branch", options, default_idx=di, step=(3, total()))
+        if chosen is interactive.BACK:
+            return "back"
+        if chosen == "enter manually…":
+            typed = interactive.ask("Branch name", default=st.get("ref") or branch,
+                                    step=(3, total()))
+            if typed is interactive.BACK:
+                return "back"
+            st["ref"] = typed
         else:
-            if var.name == "FLAVOURS" and rcfg.get("flavours"):
-                print("  recent FLAVOURS: " + ", ".join(rcfg["flavours"][-5:]))
-            provided[var.name] = interactive.ask(var.name, default=var.default)
+            st["ref"] = chosen
+        if not st["ref"]:
+            raise RepipeError("no branch selected.", EXIT_CONFIG)
+        return "next"
 
-    variables = resolve_variables(target, provided)
+    def step_vars():
+        target = st["target"]
+        provided = st["provided"]
+        if st["vars_for"] != target.name:      # pipeline changed → clear stale answers
+            provided.clear()
+            st["vars_for"] = target.name
+        # auto-fill USEREMAIL from config/git (not a prompted step)
+        for var in target.variables:
+            if var.name == "USEREMAIL" and "USEREMAIL" not in provided:
+                existing = cfg.get("user_email") or run_git(["config", "user.email"], args.path)
+                if existing:
+                    provided["USEREMAIL"] = existing
+                    if not cfg.get("user_email"):
+                        st["new_email"] = existing
+        prompts = promptable(target)
+        j = 0
+        while j < len(prompts):
+            res = _ask_var(prompts[j], provided, rcfg, args, step=(4, total()))
+            if res is interactive.BACK:
+                if j == 0:
+                    return "back"
+                j -= 1
+                continue
+            provided[prompts[j].name] = res
+            j += 1
+        st["variables"] = resolve_variables(target, provided)
+        return "next"
 
-    # 5. summary + confirm (prod is confirmed by the typed-name gate in _finish_run)
-    print(f"\n{interactive.cyan('→')} {interactive.bold(target.name)} "
-          f"{interactive.env_badge(target.env)} on {interactive.bold(ref)}")
-    for k, v in variables:
-        print(f"    {interactive.dim(k + ' =')} {v}")
-    if not args.dry_run and not args.yes and target.env != "prod":
-        if not interactive.confirm("Proceed?", default=True):
+    def step_confirm():
+        target, ref, variables = st["target"], st["ref"], st["variables"]
+        rows = [("pipeline", target.name),
+                ("env", interactive.env_badge(target.env)),
+                ("branch", ref)] + [(k, v) for k, v in variables]
+        kw = max(len(k) for k, _ in rows)
+        print("\n" + interactive.bold("Summary"))
+        for k, v in rows:
+            print(f"  {interactive.dim(k.ljust(kw))}   {v}")
+        if args.dry_run or args.yes:
+            return "next"
+        choice = interactive.pick("Confirm", ["Trigger it", "Go back", "Cancel"],
+                                  step=(total(), total()))
+        if choice is interactive.BACK or choice == "Go back":
+            return "back"
+        if choice == "Cancel":
+            return "abort"
+        return "next"
+
+    steps = [step_pipeline, step_env, step_branch, step_vars, step_confirm]
+    i = 0
+    while i < len(steps):
+        result = steps[i]()
+        if result == "back":
+            i = max(0, i - 1)
+        elif result == "abort":
             print("aborted.")
             return EXIT_OK
+        else:
+            i += 1
 
+    target, ref, variables = st["target"], st["ref"], st["variables"]
     rargs = _run_args_namespace(
         dry_run=args.dry_run, yes=args.yes,
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=cfg.get("retry_on"),
     )
-    code = _finish_run(provider, target, ref, variables, rargs)
+    code = _finish_run(provider, target, ref, variables, rargs,
+                       confirmed=(target.env != "prod"))
 
-    # 6. persist (only after a real trigger passed the prod gate)
     if not args.dry_run:
-        if new_email:
-            cfg["user_email"] = new_email
+        if st["new_email"]:
+            cfg["user_email"] = st["new_email"]
         vmap = dict(variables)
         if "FLAVOURS" in vmap:
             config.remember_flavour(cfg, repo_key, vmap["FLAVOURS"])

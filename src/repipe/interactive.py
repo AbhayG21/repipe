@@ -1,9 +1,9 @@
-"""Terminal UI: colors, an arrow-key selector, prompts, and a poll spinner.
+"""Terminal UI: colors, a back-aware arrow-key selector, prompts, banner, spinner.
 
 Zero-dependency (ANSI + termios/tty from the stdlib). Everything degrades
-gracefully: colors switch off when stdout isn't a TTY (or NO_COLOR is set),
-and the selector falls back to a numbered input prompt when stdin isn't a TTY
-— so piped/CI use and the plain prompt path keep working unchanged.
+gracefully: colors switch off when stdout isn't a TTY (or NO_COLOR is set), and
+the selector falls back to a numbered input prompt when stdin isn't a TTY — so
+piped/CI use keeps working unchanged.
 """
 
 import os
@@ -12,6 +12,9 @@ import sys
 from .errors import RepipeError, EXIT_CONFIG
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# Sentinel returned by pick()/ask() when the user asks to go back a step.
+BACK = object()
 
 
 # --- color ------------------------------------------------------------------
@@ -52,6 +55,17 @@ def env_badge(env: str) -> str:
     return green("[qa]") if env == "qa" else red(f"[{env}]")
 
 
+def banner(repo_key, provider_name, version):
+    """Compact welcome header. Shown whenever interactive (stdout is a TTY);
+    colors within it still respect NO_COLOR."""
+    if not sys.stdout.isatty():
+        return
+    print(bold(cyan("repipe")) + dim(f"  v{version}"))
+    print(dim(f"{repo_key} · {provider_name}"))
+    print(dim("↑/↓ move · ← back · Enter select · ^C quit"))
+    print(dim("─" * 46))
+
+
 # --- input helpers ----------------------------------------------------------
 
 def _input(prompt: str) -> str:
@@ -75,34 +89,49 @@ def _can_raw() -> bool:
         return False
 
 
-def _numbered(label, items, default_idx, to_str):
+def _step_line(step):
+    if step:
+        print(dim(f"Step {step[0]} of {step[1]}"))
+        return 1
+    return 0
+
+
+def _numbered(label, items, default_idx, to_str, allow_back, step):
+    _step_line(step)
     for i, it in enumerate(items):
         marker = cyan("→") if i == default_idx else " "
         print(f"  {marker} {dim(str(i + 1) + ')')} {to_str(it)}")
+    hint = "  (‹ back)" if allow_back else ""
     while True:
-        raw = _input(f"{cyan('?')} {bold(label)} [{default_idx + 1}]: ").strip()
+        raw = _input(f"{cyan('?')} {bold(label)}{dim(hint)} [{default_idx + 1}]: ").strip()
+        if allow_back and raw in ("<", "b"):
+            return BACK
         if not raw:
             return items[default_idx]
         if raw.isdigit() and 1 <= int(raw) <= len(items):
             return items[int(raw) - 1]
-        print(f"  enter a number 1–{len(items)}.")
+        print(f"  enter a number 1–{len(items)}" + (" (or '<' to go back)" if allow_back else ""))
 
 
-def pick(label, items, default_idx=0, to_str=str):
-    """Arrow-key selector (↑/↓/Enter, digit to jump-select). Returns the chosen
-    item. Falls back to a numbered prompt when stdin isn't a TTY."""
+def pick(label, items, default_idx=0, to_str=str, allow_back=True, step=None):
+    """Back-aware arrow-key selector. Returns the chosen item, or BACK.
+    ↑/↓ move, Enter/digit select, ←/Backspace go back. Falls back to a
+    numbered prompt when stdin isn't a TTY."""
     if not items:
         raise RepipeError(f"nothing to choose for '{label}'.", EXIT_CONFIG)
     default_idx = max(0, min(default_idx, len(items) - 1))
     if not _can_raw():
-        return _numbered(label, items, default_idx, to_str)
+        return _numbered(label, items, default_idx, to_str, allow_back, step)
 
     import termios
     import tty
 
     idx = default_idx
     n = len(items)
-    print(f"{cyan('?')} {bold(label)} {dim('(↑/↓ · Enter)')}")
+    header = _step_line(step)
+    hint = "↑/↓ · Enter" + (" · ← back" if allow_back else "")
+    print(f"{cyan('?')} {bold(label)} {dim('(' + hint + ')')}")
+    header += 1
 
     def render():
         for i, it in enumerate(items):
@@ -117,21 +146,30 @@ def pick(label, items, default_idx=0, to_str=str):
     render()
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
+    go_back = False
     try:
         tty.setraw(fd)
         while True:
-            ch = sys.stdin.read(1)
+            ch = os.read(fd, 1).decode(errors="ignore")
+            if not ch:
+                break
             if ch == "\x03":  # Ctrl-C
                 raise KeyboardInterrupt
-            if ch == "\x1b":  # arrow escape sequence
-                seq = sys.stdin.read(2)
+            if ch == "\x1b":  # escape sequence (arrows)
+                seq = os.read(fd, 2).decode(errors="ignore")
                 if seq == "[A":
                     idx = (idx - 1) % n
                 elif seq == "[B":
                     idx = (idx + 1) % n
+                elif seq == "[D" and allow_back:  # left
+                    go_back = True
+                    break
                 else:
                     continue
             elif ch in ("\r", "\n"):
+                break
+            elif ch == "\x7f" and allow_back:  # backspace
+                go_back = True
                 break
             elif ch.isdigit() and 1 <= int(ch) <= n:
                 idx = int(ch) - 1
@@ -142,13 +180,25 @@ def pick(label, items, default_idx=0, to_str=str):
             render()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
-    sys.stdout.write("\n")
-    return items[idx]
+
+    up = header + n
+    sys.stdout.write(f"\x1b[{up}A\r\x1b[J")  # clear header + block
+    if go_back:
+        print(dim(f"‹ {label}"))
+        return BACK
+    chosen = items[idx]
+    print(f"{green('✓')} {dim(label)}  {bold(to_str(chosen))}")
+    return chosen
 
 
-def ask(label, default=None) -> str:
+def ask(label, default=None, allow_back=True, step=None):
+    if color_enabled():
+        _step_line(step)
     suffix = dim(f" [{default}]") if default else ""
-    raw = _input(f"{cyan('?')} {bold(label)}{suffix}: ").strip()
+    hint = dim(" (‹ back)") if allow_back else ""
+    raw = _input(f"{cyan('?')} {bold(label)}{suffix}{hint}: ").strip()
+    if allow_back and raw == "<":
+        return BACK
     return raw or (default or "")
 
 
