@@ -54,6 +54,51 @@ def parse_remote(url: str):
     return host, workspace, repo
 
 
+def list_branches(cwd=".", prefix=None):
+    """Branch short-names (local + origin/…), newest first by committer date,
+    de-duplicated. Optionally filtered to those starting with `prefix`.
+    """
+    out = run_git(
+        [
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+        cwd,
+    )
+    names = []
+    for line in (out or "").splitlines():
+        n = line.strip()
+        if n.startswith("origin/"):
+            n = n[len("origin/"):]
+        if not n or n == "HEAD" or n in names:
+            continue
+        names.append(n)
+    if prefix:
+        names = [n for n in names if n.startswith(prefix)]
+    return names
+
+
+def branch_candidates(cwd, current, prefix, limit=4):
+    """Ordered branch suggestions for a prompt: newest release-prefixed branch
+    first, the current branch always offered, then a few more recent matches.
+    """
+    matching = list_branches(cwd, prefix)
+    candidates = []
+    if matching:
+        candidates.append(matching[0])
+    if current and current not in candidates:
+        candidates.append(current)
+    for b in matching[1:]:
+        if b not in candidates:
+            candidates.append(b)
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
 def detect_repo(cwd="."):
     """Return (host, workspace, repo, current_branch) from git in cwd."""
     url = run_git(["remote", "get-url", "origin"], cwd)

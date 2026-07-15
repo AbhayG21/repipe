@@ -71,27 +71,40 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 ## Usage
 
 ```bash
-repipe version                          # print version                    ✅
-repipe --help                           # full command list                ✅
-repipe list                             # list runnable pipelines           ✅
-repipe status <uuid|build#>             # state of a run                    ✅
-repipe logs   <uuid|build#> [--all]     # step logs of a run                ✅
-repipe run -p <PIPELINE> -b <branch>    # trigger a run (--dry-run to preview)  ✅
-repipe run ... --var KEY=VALUE          # set pipeline variables (repeatable)   ✅
-repipe                                  # interactive trigger + retry       ⏳ phase 4
+repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
+repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
+repipe rerun                            # repeat the last invocation for this repo
+repipe list                             # list runnable pipelines (offline, from the yml)
+repipe status <uuid|build#>             # state of a run
+repipe logs   <uuid|build#> [--all]     # step logs of a run
+repipe run -p <PIPELINE> -b <branch>    # trigger + watch + auto-retry (scriptable)
+repipe version | --help
 ```
 
-`run` triggers today; **watch + auto-retry** land in phase 3. Example against `supply-core-new`:
+### Interactive (the everyday command)
+
+Run `repipe` with no arguments inside a repo. It discovers what it can and asks only for the rest: it lists the pipelines, infers QA vs prod from the name, offers the newest `qa-release*`/`prod-release*` branch (plus your current branch), defaults `Project` from your config, and remembers `USEREMAIL`/`FLAVOURS` so it stops asking. Then it triggers, watches, and auto-retries.
+
+### Scriptable (CI / Claude)
 
 ```bash
 # preview the exact API request without sending it
 repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May --dry-run
 
-# trigger for real → prints build number + web URL
-repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May
+# trigger, watch, and auto-retry on transient failures
+repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May \
+  --retry-on "OutOfMemoryError" --max-retries 3 --yes
 ```
 
-Bad or missing variables are caught locally in ~1s (before any API call), e.g. `Project` must be `PCI`/`NON-PCI`, and `MULTI=false` forbids space-separated `FLAVOURS`.
+Bad or missing variables are caught locally in ~1s (before any API call): `Project` must be `PCI`/`NON-PCI`, and `MULTI=false` forbids space-separated `FLAVOURS`.
+
+### Auto-retry
+
+On failure, repipe reads the failed step's log and re-triggers **only** if it matches a retry pattern — built-in transient signatures (DNS, timeouts, OOM, Docker rate-limits, 5xx, gradle daemon) plus any `--retry-on`/config `retry_on`. No match ⇒ it stops and surfaces the failure (never loops). Exit codes: `0` success/halted-at-gate, `1` failed-no-match, `2` retries exhausted, `3` config/auth, `4` timeout.
+
+### Production safety
+
+Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation** (type the pipeline name, or `--yes` for CI), retries are capped low and restricted to built-in transient patterns (override with `--force`), and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
 
 ## Configuration
 
