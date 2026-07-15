@@ -20,10 +20,11 @@ match = "substring"
 # Default retry cap for non-prod pipelines.
 max_retries = 2
 
-# Extra retry patterns, applied to EVERY command. Appended on top of repipe's
-# built-in transient patterns (DNS/network, timeouts, OutOfMemoryError,
-# Docker pull/rate-limit, gradle daemon crashes, …).
-retry_on = ["OutOfMemoryError", "Could not resolve host"]
+# Retry patterns — YOU choose these. repipe applies NONE by default; it only
+# re-triggers a failed run whose log matches a pattern you list here (or pass
+# with --retry-on). No pattern configured => no retries.
+# Run `repipe suggestions` for a starter list of common transient errors to copy.
+retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 
 # ---------------------------------------------------------------------------
 # Per-repo — keyed by "<workspace>/<repo>"

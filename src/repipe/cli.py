@@ -21,7 +21,7 @@ from .http import get_auth
 from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
-from .retry import build_patterns, first_match
+from .retry import build_patterns, first_match, SUGGESTED_RETRY_PATTERNS
 from .varschema import resolve_variables, PROJECT_VALUES
 
 
@@ -180,16 +180,13 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
     if not confirmed:
         _prod_gate(target, args)
 
-    # Conservative prod policy: low retry cap, built-in transient patterns only
-    # (never custom --retry-on), unless --force.
+    # Conservative prod policy: no auto-retry unless explicitly --force'd
+    # (there is no shipped "safe" pattern set to fall back on).
     if target.env == "prod" and not getattr(args, "force", False):
-        if args.max_retries > 1:
-            print("  (prod: capping retries at 1; use --force to override)")
-            args.max_retries = 1
-        if args.retry_on:
-            print("  (prod: ignoring custom --retry-on; built-in patterns only)")
-            args.retry_on = None
-        args.no_default_patterns = False
+        if args.retry_on or args.max_retries:
+            print("  (prod: auto-retry disabled; use --force to retry on your configured patterns)")
+        args.retry_on = None
+        args.max_retries = 0
 
     auth = get_auth(required=True)
     run = provider.trigger(target.name, ref, variables, auth)
@@ -231,7 +228,7 @@ def _print_failure(failed, logs, tail_lines=30):
 
 
 def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
-    patterns = build_patterns(args.retry_on, use_defaults=not args.no_default_patterns)
+    patterns = build_patterns(args.retry_on)
     terminal = {RunState.SUCCESS, RunState.FAILED, RunState.HALTED}
     deadline = time.monotonic() + args.timeout
     attempt = 0
@@ -292,9 +289,14 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
         hit = first_match(combined, patterns, args.match)
 
         if hit is None:
-            print(interactive.red(f"✗ #{run.number} FAILED")
-                  + " — no retry pattern matched, not retrying.")
-            print(interactive.dim(f"  checked {len(patterns)} pattern(s) (mode={args.match})."))
+            print(interactive.red(f"✗ #{run.number} FAILED") + " — not retrying.")
+            if not patterns:
+                print(interactive.dim("  no retry patterns configured. Add them to "
+                                      "config `retry_on` or pass --retry-on."))
+                print(interactive.dim("  see `repipe suggestions` for a starter list."))
+            else:
+                print(interactive.dim(f"  no configured pattern matched "
+                                      f"({len(patterns)} checked, mode={args.match})."))
             _print_failure(failed, logs)
             print(f"  {run.web_url}")
             return EXIT_FAILED_NOMATCH
@@ -318,7 +320,7 @@ def _run_args_namespace(**overrides):
     for the interactive flow and rerun (which don't come from the run parser)."""
     d = dict(
         dry_run=False, yes=False, no_wait=False, force=False,
-        retry_on=None, match="substring", no_default_patterns=False,
+        retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
     )
     d.update(overrides)
@@ -521,7 +523,24 @@ def cmd_init(args) -> int:
     print(f"  pipelines: {len(targets)}")
     if has_project:
         print(f"  default_project: {r.get('default_project')}")
-    print("\nEdit that file to tune defaults (retry_on, branch prefixes, max_retries).")
+    print("\nEdit that file to set your defaults (branch prefixes, max_retries).")
+    print("repipe does NOT retry by default — add your own `retry_on` patterns.")
+    print("Run `repipe suggestions` for a starter list you can copy.")
+    return EXIT_OK
+
+
+def cmd_suggestions(args) -> int:
+    print("repipe applies NO retry patterns by default — you choose them.\n")
+    print("Suggested patterns (common transient/infra errors):")
+    for p in SUGGESTED_RETRY_PATTERNS:
+        print(f"  {p}")
+    print("\nCopy the ones you want into ~/.config/repipe/config.toml:\n")
+    print("retry_on = [")
+    for p in SUGGESTED_RETRY_PATTERNS:
+        print(f'  "{p}",')
+    print("]")
+    print("\n…or per run:  repipe run … --retry-on \"pattern\" [--retry-on …]")
+    print("Matching is case-insensitive substring by default (--match regex for regex).")
     return EXIT_OK
 
 
@@ -607,9 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--retry-on", action="append", metavar="PATTERN",
                        help="extra retry pattern (repeatable; appends to built-ins)")
     p_run.add_argument("--match", choices=["substring", "regex"], default="substring",
-                       help="how --retry-on/built-in patterns match (default: substring)")
-    p_run.add_argument("--no-default-patterns", action="store_true",
-                       help="don't use the built-in transient-error patterns")
+                       help="how retry patterns match (default: substring)")
     p_run.add_argument("--max-retries", type=int, default=2,
                        help="max re-triggers on a matching failure (default: 2)")
     p_run.add_argument("--poll-interval", type=int, default=20,
@@ -621,6 +638,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init", parents=[common],
                    help="scaffold ~/.config/repipe/config.toml from this repo")
+    sub.add_parser("suggestions",
+                   help="print suggested retry patterns to copy into config")
 
     p_rerun = sub.add_parser("rerun", parents=[common],
                              help="repeat the last invocation for this repo")
@@ -652,6 +671,8 @@ def main(argv=None) -> int:
             return cmd_run(args)
         if args.command == "init":
             return cmd_init(args)
+        if args.command == "suggestions":
+            return cmd_suggestions(args)
         if args.command == "rerun":
             return cmd_rerun(args)
     except RepipeError as e:

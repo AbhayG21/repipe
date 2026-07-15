@@ -1,15 +1,19 @@
 """Retry-pattern matching.
 
-Built-in patterns cover transient/infra failures that are safe to re-trigger.
-Users append their own with --retry-on (substring by default, or regex). If
-nothing matches a failed run's log, repipe does NOT retry — it surfaces the
-(probably real) failure instead of looping.
+repipe applies NO retry patterns by default: it only re-triggers on patterns
+the user configures (config `retry_on` and/or --retry-on). No configured
+pattern matches a failed run's log ⇒ repipe does NOT retry — it surfaces the
+failure instead of looping.
+
+The list below is a *suggestion* set (common transient/infra errors) that we
+surface via `repipe suggestions` for users to copy from. It is never applied
+automatically — each org decides its own patterns.
 """
 
 import re
 
-# Substring patterns (matched case-insensitively) for transient failures.
-DEFAULT_RETRY_PATTERNS = [
+# Suggested patterns only — surfaced to users, NOT applied unless configured.
+SUGGESTED_RETRY_PATTERNS = [
     # DNS / network
     "could not resolve host",
     "temporary failure in name resolution",
@@ -43,11 +47,10 @@ DEFAULT_RETRY_PATTERNS = [
 ]
 
 
-def build_patterns(retry_on, use_defaults=True):
-    """Combine built-ins (unless opted out) with user --retry-on patterns."""
-    patterns = list(DEFAULT_RETRY_PATTERNS) if use_defaults else []
-    patterns += list(retry_on or [])
-    return patterns
+def build_patterns(retry_on):
+    """Retry patterns come only from the user (config `retry_on` + --retry-on).
+    There are no built-in defaults; no config ⇒ no retries."""
+    return list(retry_on or [])
 
 
 def first_match(log, patterns, mode="substring"):

@@ -73,6 +73,7 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 ```bash
 repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
 repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
+repipe suggestions                      # print suggested retry patterns to copy into config
 repipe rerun                            # repeat the last invocation for this repo
 repipe list                             # list runnable pipelines (offline, from the yml)
 repipe status <uuid|build#>             # state of a run
@@ -98,13 +99,19 @@ repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May \
 
 Bad or missing variables are caught locally in ~1s (before any API call): `Project` must be `PCI`/`NON-PCI`, and `MULTI=false` forbids space-separated `FLAVOURS`.
 
-### Auto-retry
+### Auto-retry (opt-in — you define the patterns)
 
-On failure, repipe reads the failed step's log and re-triggers **only** if it matches a retry pattern — built-in transient signatures (DNS, timeouts, OOM, Docker rate-limits, 5xx, gradle daemon) plus any `--retry-on`/config `retry_on`. No match ⇒ it stops and surfaces the failure (never loops). Exit codes: `0` success/halted-at-gate, `1` failed-no-match, `2` retries exhausted, `3` config/auth, `4` timeout.
+repipe ships **no** retry patterns and retries **nothing** by default. You decide which failures are worth re-triggering: list patterns in config `retry_on`, or pass `--retry-on` per run. On failure, repipe reads the failed step's log and re-triggers **only** if it matches one of *your* patterns; no match ⇒ it stops and surfaces the failure (never loops).
+
+```bash
+repipe suggestions          # a starter list of common transient errors to copy
+```
+
+Matching is case-insensitive substring by default (`--match regex` for regex). Exit codes: `0` success/halted-at-gate, `1` failed-no-match, `2` retries exhausted, `3` config/auth, `4` timeout.
 
 ### Production safety
 
-Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation** (type the pipeline name, or `--yes` for CI), retries are capped low and restricted to built-in transient patterns (override with `--force`), and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
+Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation** (type the pipeline name, or `--yes` for CI), prod runs **do not auto-retry** unless you pass `--force`, and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
 
 ## Configuration
 
