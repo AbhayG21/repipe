@@ -70,7 +70,7 @@ class BitbucketProvider(Provider):
             if result == "STOPPED":
                 return RunState.HALTED, name, result
             return RunState.UNKNOWN, name, result
-        if name in ("PENDING", "IN_PROGRESS", "BUILDING", "RUNNING"):
+        if name in ("PENDING", "PARSING", "IN_PROGRESS", "BUILDING", "RUNNING"):
             return RunState.RUNNING, name, result
         if name in ("PAUSED", "HALTED"):
             return RunState.HALTED, name, result

@@ -3,14 +3,23 @@
 import argparse
 import json
 import sys
+import time
 
 from . import __version__
-from .errors import RepipeError, EXIT_OK, EXIT_CONFIG
+from .errors import (
+    RepipeError,
+    EXIT_OK,
+    EXIT_CONFIG,
+    EXIT_FAILED_NOMATCH,
+    EXIT_RETRIES,
+    EXIT_TIMEOUT,
+)
 from .gitutil import detect_repo
 from .http import get_auth
 from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
+from .retry import build_patterns, first_match
 from .varschema import resolve_variables
 
 
@@ -139,14 +148,98 @@ def cmd_run(args) -> int:
 
     auth = get_auth(required=True)
     run = provider.trigger(target.name, ref, variables, auth)
-    print(f"➜ triggered {target.name} on {ref}")
+    _announce(target.name, ref, run)
+
+    if args.no_wait:
+        print("\n(--no-wait: triggered only, not watching)")
+        return EXIT_OK
+
+    return _watch_and_retry(provider, target, ref, variables, auth, run, args)
+
+
+def _announce(pipeline, ref, run):
+    print(f"➜ triggered {pipeline} on {ref}")
     if run.number is not None:
         print(f"  build:  #{run.number}")
     print(f"  state:  {run.native_state or run.state}")
     if run.web_url:
         print(f"  url:    {run.web_url}")
-    print("\n(watch/retry lands in phase 3 — this only triggers for now)")
-    return EXIT_OK
+
+
+def _print_failure(failed, logs, tail_lines=30):
+    """Print failed step names + a tail of their logs (fallback: names only)."""
+    names = ", ".join(s.name for s in failed) or "(unknown)"
+    print(f"  failed step(s): {names}")
+    body = "\n".join(text for _, text in logs).strip()
+    if not body:
+        print("  (no log body available — reporting step result only)")
+        return
+    lines = body.splitlines()
+    if len(lines) > tail_lines:
+        print(f"  --- last {tail_lines} log lines ---")
+        lines = lines[-tail_lines:]
+    else:
+        print("  --- log ---")
+    for ln in lines:
+        print(f"  | {ln}")
+
+
+def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
+    patterns = build_patterns(args.retry_on, use_defaults=not args.no_default_patterns)
+    terminal = {RunState.SUCCESS, RunState.FAILED, RunState.HALTED}
+    deadline = time.monotonic() + args.timeout
+    attempt = 0
+
+    print(f"\nwatching (poll {args.poll_interval}s, timeout {args.timeout}s, "
+          f"max-retries {args.max_retries}) …")
+
+    while True:
+        # Poll the current run until it reaches a terminal state (or times out).
+        last = None
+        while run.state not in terminal:
+            if time.monotonic() > deadline:
+                print(f"⌛ timed out after {args.timeout}s (last state "
+                      f"{run.native_state or run.state}) — {run.web_url}")
+                return EXIT_TIMEOUT
+            time.sleep(args.poll_interval)
+            run = provider.get_run(run.id, auth)
+            if run.native_state != last:
+                print(f"  … {run.native_state or run.state}")
+                last = run.native_state
+
+        if run.state == RunState.SUCCESS:
+            print(f"✓ #{run.number} SUCCESSFUL — {run.web_url}")
+            return EXIT_OK
+
+        if run.state == RunState.HALTED:
+            print(f"‖ #{run.number} paused at a manual gate (build+push done). "
+                  f"Approve the deploy here:\n  {run.web_url}")
+            return EXIT_OK
+
+        # FAILED — decide whether to retry.
+        failed, logs = provider.failed_step_logs(run, auth)
+        combined = "\n".join(text for _, text in logs)
+        hit = first_match(combined, patterns, args.match)
+
+        if hit is None:
+            print(f"✗ #{run.number} FAILED — no retry pattern matched, not retrying.")
+            print(f"  checked {len(patterns)} pattern(s) (mode={args.match}).")
+            _print_failure(failed, logs)
+            print(f"  {run.web_url}")
+            return EXIT_FAILED_NOMATCH
+
+        if attempt >= args.max_retries:
+            print(f"✗ #{run.number} FAILED — matched '{hit}' but retries "
+                  f"exhausted ({args.max_retries}).")
+            _print_failure(failed, logs)
+            print(f"  {run.web_url}")
+            return EXIT_RETRIES
+
+        attempt += 1
+        print(f"↻ #{run.number} FAILED — matched '{hit}', re-triggering "
+              f"(retry {attempt}/{args.max_retries}) …")
+        run = provider.trigger(target.name, ref, variables, auth)
+        _announce(target.name, ref, run)
 
 
 def _not_yet(command: str, phase: int) -> int:
@@ -203,6 +296,20 @@ def build_parser() -> argparse.ArgumentParser:
                        help="print the exact request without calling the API")
     p_run.add_argument("--yes", "--non-interactive", dest="yes",
                        action="store_true", help="disable prompts (CI/scripting)")
+    p_run.add_argument("--no-wait", action="store_true",
+                       help="trigger only; don't poll or retry")
+    p_run.add_argument("--retry-on", action="append", metavar="PATTERN",
+                       help="extra retry pattern (repeatable; appends to built-ins)")
+    p_run.add_argument("--match", choices=["substring", "regex"], default="substring",
+                       help="how --retry-on/built-in patterns match (default: substring)")
+    p_run.add_argument("--no-default-patterns", action="store_true",
+                       help="don't use the built-in transient-error patterns")
+    p_run.add_argument("--max-retries", type=int, default=2,
+                       help="max re-triggers on a matching failure (default: 2)")
+    p_run.add_argument("--poll-interval", type=int, default=20,
+                       help="seconds between status polls (default: 20)")
+    p_run.add_argument("--timeout", type=int, default=3600,
+                       help="give up watching after N seconds (default: 3600)")
 
     # Still stubbed — implemented in later phases.
     sub.add_parser("init", help="[phase 4] scaffold config from the repo")

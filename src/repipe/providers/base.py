@@ -1,6 +1,6 @@
 """The Provider interface every CI host implements."""
 
-from ..model import Run, Step
+from ..model import Run, RunState, Step
 
 
 class Provider:
@@ -44,3 +44,15 @@ class Provider:
     def get_step_log(self, run: Run, step: Step, auth) -> str:
         """Fetch a step's raw log (may be empty)."""
         raise NotImplementedError
+
+    # --- generic, provider-neutral (built on the methods above) ---
+
+    def failed_step_logs(self, run: Run, auth):
+        """Return (failed_steps, [(step_name, log_text), …]) for a failed run.
+
+        Tolerates empty logs — the caller falls back to step names when a body
+        is unavailable.
+        """
+        failed = [s for s in self.get_steps(run, auth) if s.state == RunState.FAILED]
+        logs = [(s.name, self.get_step_log(run, s, auth)) for s in failed]
+        return failed, logs
