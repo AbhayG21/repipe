@@ -3,7 +3,7 @@
 # repipe installer.
 #
 #   Remote (the published one-liner):
-#     curl -fsSL https://raw.githubusercontent.com/<abhay>/repipe/main/install.sh | bash
+#     curl -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | bash
 #
 #   Local (testing before the repo is published):
 #     bash install.sh          # copies the ./repipe sitting next to this script
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # --- config: change this to the real repo before publishing -----------------
-REPO="${REPIPE_REPO:-<abhay>/repipe}"
+REPO="${REPIPE_REPO:-AbhayG21/repipe}"
 REF="${REPIPE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
 # ----------------------------------------------------------------------------

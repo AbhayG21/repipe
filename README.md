@@ -11,7 +11,7 @@ Trigger a CI pipeline on demand and **auto-retry it when it fails with a transie
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<abhay>/repipe/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | bash
 ```
 
 This installs `repipe` into `~/.local/bin` (or `/usr/local/bin`) and checks for `python3`. If the install dir isn't on your `PATH`, the installer prints the `export PATH=…` line to add.
