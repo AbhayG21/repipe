@@ -1,0 +1,3 @@
+# The distributable `repipe` is a zipapp (binary), generated from src/ by build.sh.
+# Mark it so GitHub doesn't attempt textual diffs and flags it as generated.
+repipe binary linguist-generated=true

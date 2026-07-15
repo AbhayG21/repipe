@@ -1,0 +1,17 @@
+# repipe — never commit credentials or local state
+credentials
+*.credentials
+.env
+.env.*
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# os / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

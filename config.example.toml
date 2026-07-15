@@ -1,0 +1,40 @@
+# repipe configuration — copy to ~/.config/repipe/config.toml and edit.
+#
+# NON-SECRET values only. Never put access tokens or API tokens in here.
+# Tokens go in the REPIPE_TOKEN env var (or ~/.config/repipe/credentials, chmod 600).
+#
+# Everything here is optional — repipe works with no config at all, it just
+# asks more questions. Config lets you answer the repeatable ones once.
+
+# ---------------------------------------------------------------------------
+# Global — applies to every repo / pipeline
+# ---------------------------------------------------------------------------
+
+# Reused for the USEREMAIL pipeline variable. Asked once (prefilled from
+# `git config user.email`) on first run, then remembered here.
+user_email = "you@example.com"
+
+# How --retry-on patterns are matched: "substring" (default) or "regex".
+match = "substring"
+
+# Default retry cap for non-prod pipelines.
+max_retries = 2
+
+# Extra retry patterns, applied to EVERY command. Appended on top of repipe's
+# built-in transient patterns (DNS/network, timeouts, OutOfMemoryError,
+# Docker pull/rate-limit, gradle daemon crashes, …).
+retry_on = ["OutOfMemoryError", "Could not resolve host"]
+
+# ---------------------------------------------------------------------------
+# Per-repo — keyed by "<workspace>/<repo>"
+# ---------------------------------------------------------------------------
+
+[repos."me-cleartrip/supply-core-new"]
+provider           = "bitbucket"   # auto-detected from the git remote on `repipe init`
+default_project    = "NON-PCI"     # default for the Project variable (PCI | NON-PCI)
+qa_branch_prefix   = "qa-release"  # used to pick the newest QA release branch
+prod_branch_prefix = "prod-release"
+
+# repipe also persists per-repo state under this section as you use it:
+#   remembered FLAVOURS values (autocomplete suggestions)
+#   last_run (so `repipe rerun` can repeat your last invocation)
