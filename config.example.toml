@@ -10,8 +10,8 @@
 # Global — applies to every repo / pipeline
 # ---------------------------------------------------------------------------
 
-# Reused for the USEREMAIL pipeline variable. Asked once (prefilled from
-# `git config user.email`) on first run, then remembered here.
+# Used to auto-fill any variable whose schema sets `autofill = "git_email"`.
+# Prefilled from `git config user.email` on first run, then remembered here.
 user_email = "you@example.com"
 
 # How --retry-on patterns are matched: "substring" (default) or "regex".
@@ -30,12 +30,42 @@ retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 # Per-repo — keyed by "<workspace>/<repo>"
 # ---------------------------------------------------------------------------
 
-[repos."me-cleartrip/supply-core-new"]
+[repos."your-workspace/your-repo"]
 provider           = "bitbucket"   # auto-detected from the git remote on `repipe init`
-default_project    = "NON-PCI"     # default for the Project variable (PCI | NON-PCI)
 qa_branch_prefix   = "qa-release"  # used to pick the newest QA release branch
 prod_branch_prefix = "prod-release"
 
-# repipe also persists per-repo state under this section as you use it:
-#   remembered FLAVOURS values (autocomplete suggestions)
-#   last_run (so `repipe rerun` can repeat your last invocation)
+# ---------------------------------------------------------------------------
+# Per-variable input schema — design your own pipeline inputs here.
+# One [repos."ws/repo".variables.<NAME>] table per pipeline variable you want
+# to constrain. All fields optional; `repipe init` scaffolds a stub per
+# discovered variable (seeding `enum` from any yml-declared allowed-values).
+# ---------------------------------------------------------------------------
+
+# enum      — allowed values (interactive shows a picker; validated on trigger)
+# default   — value used when you don't pass --var / press enter
+# required  — must be provided (defaults true for a declared var with no default)
+# pattern   — value must match this regex (e.g. an email or version format)
+# autofill  — "git_email": fill from user_email / git, and don't prompt
+# remember  — persist entered values and show recent ones as suggestions
+# no_spaces_unless — spaces allowed only when the named sibling var is truthy
+# hint      — a one-line help string shown before the prompt
+
+[repos."your-workspace/your-repo".variables.Environment]
+enum     = ["staging", "canary", "production"]
+default  = "staging"
+required = true
+
+[repos."your-workspace/your-repo".variables.Owner]
+pattern  = ".+@.+"
+autofill = "git_email"
+
+[repos."your-workspace/your-repo".variables.Services]
+required         = true
+remember         = true
+no_spaces_unless = "MultiService"
+hint             = "space-separate multiple only when MultiService=true"
+
+# repipe also persists per-repo state under this repo section as you use it:
+#   [repos."ws/repo".remembered]  — values for `remember = true` variables
+#   [repos."ws/repo".last_run]    — so `repipe rerun` can repeat your last run

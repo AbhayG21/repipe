@@ -94,20 +94,20 @@ repipe version | --help
 
 ### Interactive (the everyday command)
 
-Run `repipe` with no arguments inside a repo. It discovers what it can and asks only for the rest: it lists the pipelines, infers QA vs prod from the name, offers the newest `qa-release*`/`prod-release*` branch (plus your current branch), defaults `Project` from your config, and remembers `USEREMAIL`/`FLAVOURS` so it stops asking. Then it triggers, watches, and auto-retries.
+Run `repipe` with no arguments inside a repo. It discovers what it can and asks only for the rest: it lists the pipelines, infers QA vs prod from the name, offers the newest `qa-release*`/`prod-release*` branch (plus your current branch), and drives its variable prompts from the per-repo schema you configure — offering pickers for `enum` values, defaults, auto-filling variables from your git email, and remembering values you've entered before so it stops asking. Then it triggers, watches, and auto-retries.
 
 ### Scriptable (CI / Claude)
 
 ```bash
 # preview the exact API request without sending it
-repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May --dry-run
+repipe run -p deploy-qa -b qa-release-2024-05-29 --dry-run
 
 # trigger, watch, and auto-retry on transient failures
-repipe run -p BUILD_AND_DEPLOY_SUPPLY_CORE_NEW_QA -b qa-release-29-May \
+repipe run -p deploy-qa -b qa-release-2024-05-29 \
   --retry-on "OutOfMemoryError" --max-retries 3 --yes
 ```
 
-Bad or missing variables are caught locally in ~1s (before any API call): `Project` must be `PCI`/`NON-PCI`, and `MULTI=false` forbids space-separated `FLAVOURS`.
+Bad or missing variables are caught locally in ~1s (before any API call), using the per-repo variable schema you define in config: `enum` values, `required` flags, regex `pattern`s, and a `no_spaces_unless` cross-field rule.
 
 ### Auto-retry (opt-in — you define the patterns)
 
@@ -125,7 +125,7 @@ Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **
 
 ## Configuration
 
-Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries) and per-repo defaults (provider, default project, branch prefixes). Everything is optional.
+Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries), per-repo defaults (provider, branch prefixes), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional.
 
 ## Project layout
 

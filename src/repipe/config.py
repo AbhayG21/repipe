@@ -1,8 +1,9 @@
 """Config + persisted state at ~/.config/repipe/config.toml (non-secret only).
 
 Read with stdlib tomllib (3.11+). stdlib has no TOML *writer*, so we emit our
-own for the small, known schema below — repos keyed by "<ws>/<repo>", plus
-persisted state (remembered FLAVOURS, last_run) that `rerun` reads back.
+own for the small, known schema below — repos keyed by "<ws>/<repo>", plus a
+hand-edited per-repo `[…variables]` schema and tool-persisted state
+(`[…remembered]` values, `last_run`) that `rerun` reads back.
 """
 
 import os
@@ -82,17 +83,34 @@ def dumps(cfg: dict) -> str:
     if "retry_on" in cfg:
         lines.append(f"retry_on = {_val(cfg['retry_on'])}")
 
+    _VAR_FIELDS = (
+        "enum", "default", "required", "pattern",
+        "autofill", "remember", "no_spaces_unless", "hint",
+    )
     for key, r in (cfg.get("repos") or {}).items():
         header = f"repos.{_key(key)}"
         lines.append("")
         lines.append(f"[{header}]")
-        for k in ("provider", "default_project", "qa_branch_prefix", "prod_branch_prefix"):
+        for k in ("provider", "qa_branch_prefix", "prod_branch_prefix"):
             if k in r:
                 lines.append(f"{k} = {_val(r[k])}")
-        if r.get("flavours"):
-            lines.append(f"flavours = {_val(r['flavours'])}")
+        # Per-variable schema (hand-edited). Re-emitted so a tool-triggered
+        # save() never drops the user's constraints.
+        for vname, entry in (r.get("variables") or {}).items():
+            lines.append("")
+            lines.append(f"[{header}.variables.{_key(vname)}]")
+            for fk in _VAR_FIELDS:
+                if fk in entry:
+                    lines.append(f"{fk} = {_val(entry[fk])}")
+        remembered = r.get("remembered") or {}
+        if remembered:
+            lines.append("")
+            lines.append(f"[{header}.remembered]")
+            for rk, rv in remembered.items():
+                lines.append(f"{_key(rk)} = {_val(rv)}")
         lr = r.get("last_run") or {}
         if lr:
+            lines.append("")
             lines.append(f"[{header}.last_run]")
             for k in ("pipeline", "branch", "env"):
                 if k in lr:
@@ -114,12 +132,24 @@ def ensure_repo(cfg: dict, key: str) -> dict:
     return cfg.setdefault("repos", {}).setdefault(key, {})
 
 
-def remember_flavour(cfg: dict, key: str, value: str):
+def repo_variables(cfg: dict, key: str) -> dict:
+    """The per-repo `[variables]` schema table ({} if none)."""
+    return get_repo(cfg, key).get("variables") or {}
+
+
+def get_remembered(cfg: dict, key: str) -> dict:
+    """Tool-persisted remembered values, {varname: [values]}."""
+    return get_repo(cfg, key).get("remembered") or {}
+
+
+def remember_value(cfg: dict, key: str, varname: str, value: str):
+    """Persist an entered value for a `remember = true` variable."""
     if not value:
         return
-    flavours = ensure_repo(cfg, key).setdefault("flavours", [])
-    if value not in flavours:
-        flavours.append(value)
+    remembered = ensure_repo(cfg, key).setdefault("remembered", {})
+    values = remembered.setdefault(varname, [])
+    if value not in values:
+        values.append(value)
 
 
 def set_last_run(cfg: dict, key: str, pipeline, branch, env, variables: dict):

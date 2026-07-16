@@ -4,7 +4,7 @@ from .model import RunState, Variable
 
 
 def fmt_var(v: Variable) -> str:
-    """e.g. MULTI[=true]{true|false}"""
+    """e.g. DEPLOY[=true]{true|false}"""
     s = v.name
     if v.default is not None:
         s += f"[={v.default}]"

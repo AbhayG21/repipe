@@ -24,7 +24,7 @@ from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
 from .retry import build_patterns, first_match, SUGGESTED_RETRY_PATTERNS
-from .varschema import resolve_variables, PROJECT_VALUES
+from .varschema import resolve_variables, allowed_values_for
 
 
 def _parse_vars(pairs) -> dict:
@@ -41,6 +41,23 @@ def _parse_vars(pairs) -> dict:
             raise RepipeError(f"--var has an empty key: '{item}'.", EXIT_CONFIG)
         out[key] = value
     return out
+
+
+def _autofill_value(entry, cfg, path):
+    """A value for a variable from a known auto-source, or None. Currently the
+    only source is `autofill = "git_email"` (config user_email / git email)."""
+    if entry.get("autofill") == "git_email":
+        return cfg.get("user_email") or run_git(["config", "user.email"], path)
+    return None
+
+
+def _apply_autofill(schema, provided, cfg, path):
+    """Fill any not-yet-provided variable that declares an autofill source."""
+    for vname, entry in schema.items():
+        if vname not in provided:
+            value = _autofill_value(entry, cfg, path)
+            if value:
+                provided[vname] = value
 
 
 def _find_target(targets, name):
@@ -138,8 +155,11 @@ def cmd_run(args) -> int:
             EXIT_CONFIG,
         )
 
+    cfg = config.load()
+    schema = config.repo_variables(cfg, f"{workspace}/{repo}")
     provided = _parse_vars(args.var)
-    variables = resolve_variables(target, provided)  # fail-fast validation
+    _apply_autofill(schema, provided, cfg, args.path)
+    variables = resolve_variables(target, provided, schema)  # fail-fast validation
 
     return _finish_run(provider, target, ref, variables, args)
 
@@ -329,22 +349,23 @@ def _run_args_namespace(**overrides):
     return argparse.Namespace(**d)
 
 
-def _ask_var(var, provided, rcfg, args, step):
+def _ask_var(var, provided, entry, remembered, step):
     """Prompt for a single pipeline variable; returns the value or interactive.BACK.
-    Uses any prior answer (from going back) as the default."""
+    Uses any prior answer (from going back) as the default. All behavior is
+    driven by the per-variable config `entry` — no hardcoded variable names."""
     name = var.name
     prior = provided.get(name)
-    if name == "Project":
-        default_proj = prior or rcfg.get("default_project") or var.default or PROJECT_VALUES[0]
-        di = PROJECT_VALUES.index(default_proj) if default_proj in PROJECT_VALUES else 0
-        return interactive.pick("Project", PROJECT_VALUES, default_idx=di, step=step)
-    if var.allowed_values:
-        cur = prior if prior in var.allowed_values else var.default
-        di = var.allowed_values.index(cur) if cur in var.allowed_values else 0
-        return interactive.pick(name, var.allowed_values, default_idx=di, step=step)
-    if name == "FLAVOURS" and rcfg.get("flavours"):
-        print(interactive.dim("  recent: " + ", ".join(rcfg["flavours"][-5:])))
-    return interactive.ask(name, default=prior or var.default, step=step)
+    default = entry.get("default") if entry.get("default") is not None else var.default
+    allowed = allowed_values_for(var, entry)
+    if allowed:
+        cur = prior if prior in allowed else default
+        di = allowed.index(cur) if cur in allowed else 0
+        return interactive.pick(name, allowed, default_idx=di, step=step)
+    if entry.get("hint"):
+        print(interactive.dim("  " + entry["hint"]))
+    if entry.get("remember") and remembered.get(name):
+        print(interactive.dim("  recent: " + ", ".join(remembered[name][-5:])))
+    return interactive.ask(name, default=prior or default, step=step)
 
 
 def cmd_interactive(args) -> int:
@@ -353,6 +374,8 @@ def cmd_interactive(args) -> int:
     repo_key = f"{workspace}/{repo}"
     cfg = config.load()
     rcfg = config.get_repo(cfg, repo_key)
+    schema = config.repo_variables(cfg, repo_key)
+    remembered = config.get_remembered(cfg, repo_key)
 
     targets = provider.parse_targets(args.path)
     if not targets:
@@ -365,15 +388,12 @@ def cmd_interactive(args) -> int:
     def total():
         return st["total"]
 
+    def autofill_value(var):
+        return _autofill_value(schema.get(var.name, {}), cfg, args.path)
+
     def promptable(target):
-        out = []
-        for var in target.variables:
-            if var.name == "USEREMAIL" and (
-                cfg.get("user_email") or run_git(["config", "user.email"], args.path)
-            ):
-                continue
-            out.append(var)
-        return out
+        # Skip any variable that can be auto-filled from a known source.
+        return [v for v in target.variables if not autofill_value(v)]
 
     def step_pipeline():
         di = targets.index(st["target"]) if st.get("target") in targets else 0
@@ -425,18 +445,21 @@ def cmd_interactive(args) -> int:
         if st["vars_for"] != target.name:      # pipeline changed → clear stale answers
             provided.clear()
             st["vars_for"] = target.name
-        # auto-fill USEREMAIL from config/git (not a prompted step)
+        # auto-fill values from known sources (not prompted steps)
         for var in target.variables:
-            if var.name == "USEREMAIL" and "USEREMAIL" not in provided:
-                existing = cfg.get("user_email") or run_git(["config", "user.email"], args.path)
-                if existing:
-                    provided["USEREMAIL"] = existing
-                    if not cfg.get("user_email"):
-                        st["new_email"] = existing
+            if var.name in provided:
+                continue
+            filled = autofill_value(var)
+            if filled:
+                provided[var.name] = filled
+                if schema.get(var.name, {}).get("autofill") == "git_email" \
+                        and not cfg.get("user_email"):
+                    st["new_email"] = filled
         prompts = promptable(target)
         j = 0
         while j < len(prompts):
-            res = _ask_var(prompts[j], provided, rcfg, args, step=(4, total()))
+            entry = schema.get(prompts[j].name, {})
+            res = _ask_var(prompts[j], provided, entry, remembered, step=(4, total()))
             if res is interactive.BACK:
                 if j == 0:
                     return "back"
@@ -444,7 +467,7 @@ def cmd_interactive(args) -> int:
                 continue
             provided[prompts[j].name] = res
             j += 1
-        st["variables"] = resolve_variables(target, provided)
+        st["variables"] = resolve_variables(target, provided, schema)
         return "next"
 
     def step_confirm():
@@ -492,8 +515,9 @@ def cmd_interactive(args) -> int:
         if st["new_email"]:
             cfg["user_email"] = st["new_email"]
         vmap = dict(variables)
-        if "FLAVOURS" in vmap:
-            config.remember_flavour(cfg, repo_key, vmap["FLAVOURS"])
+        for vname, value in vmap.items():
+            if schema.get(vname, {}).get("remember"):
+                config.remember_value(cfg, repo_key, vname, value)
         config.set_last_run(cfg, repo_key, target.name, ref, target.env, vmap)
         config.save(cfg)
     return code
@@ -510,22 +534,35 @@ def cmd_init(args) -> int:
     r.setdefault("provider", provider.NAME)
     r.setdefault("qa_branch_prefix", "qa-release")
     r.setdefault("prod_branch_prefix", "prod-release")
-    has_project = any(v.name == "Project" for t in targets for v in t.variables)
-    if has_project:
-        r.setdefault("default_project", "NON-PCI")
     if not cfg.get("user_email"):
         em = run_git(["config", "user.email"], args.path)
         if em:
             cfg["user_email"] = em
+
+    # Scaffold a variable-schema stub for each discovered variable, seeding
+    # `enum` from any yml-declared allowed-values. Users fill in the rest
+    # (default/required/pattern/autofill/remember/no_spaces_unless).
+    vars_seen = {}
+    for t in targets:
+        for v in t.variables:
+            vars_seen.setdefault(v.name, list(v.allowed_values or []))
+    if vars_seen:
+        vtable = r.setdefault("variables", {})
+        for vname, allowed in vars_seen.items():
+            entry = vtable.setdefault(vname, {})
+            if allowed and "enum" not in entry:
+                entry["enum"] = allowed
 
     path = config.save(cfg)
     print(f"wrote {path}")
     print(f"  repo:      {key}")
     print(f"  provider:  {provider.NAME}")
     print(f"  pipelines: {len(targets)}")
-    if has_project:
-        print(f"  default_project: {r.get('default_project')}")
-    print("\nEdit that file to set your defaults (branch prefixes, max_retries).")
+    if vars_seen:
+        print(f"  variables: {', '.join(sorted(vars_seen))}")
+    print("\nEdit that file to set your defaults (branch prefixes, max_retries)")
+    print("and to constrain inputs under [repos.\"" + key + "\".variables.NAME]")
+    print("(enum / default / required / pattern / autofill / remember).")
     print("repipe does NOT retry by default — add your own `retry_on` patterns.")
     print("Run `repipe suggestions` for a starter list you can copy.")
     return EXIT_OK
@@ -653,7 +690,8 @@ def cmd_rerun(args) -> int:
     target = _find_target(targets, lr["pipeline"])
     target.env = lr.get("env", target.env)
     ref = lr.get("branch") or branch
-    variables = resolve_variables(target, dict(lr.get("vars") or {}))
+    schema = config.repo_variables(cfg, key)
+    variables = resolve_variables(target, dict(lr.get("vars") or {}), schema)
     print(f"rerun: {target.name} [{target.env}] on '{ref}'")
     rargs = _run_args_namespace(
         dry_run=args.dry_run, yes=args.yes,
