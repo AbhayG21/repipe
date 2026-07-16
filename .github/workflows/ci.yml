@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"     # 3.11+ so tomllib is exercised
+
+      - name: Byte-compile all sources
+        run: python3 -m py_compile src/repipe/*.py src/repipe/providers/*.py src/__main__.py
+
+      - name: Unit tests (stdlib unittest, no deps, no secrets)
+        run: python3 -m unittest discover -s tests -t . -v
+
+  build-determinism:
+    # The committed `repipe` zipapp must match a fresh reproducible build of src/,
+    # so a stale artifact can never ship. build.sh pins mtimes + TZ for byte-stable
+    # output; guard both that it reproduces and that the committed copy is current.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build is reproducible (two builds are byte-identical)
+        run: |
+          bash build.sh >/dev/null
+          cp repipe /tmp/repipe.first
+          bash build.sh >/dev/null
+          cmp /tmp/repipe.first repipe
+
+      - name: Committed artifact matches src/
+        run: git diff --exit-code -- repipe
