@@ -100,6 +100,43 @@ class GetAuth(unittest.TestCase):
             http.save_credentials({"REPIPE_EMAIL": "e@x.com", "REPIPE_API_TOKEN": "a"})
             self.assertEqual(http.get_auth(), ("basic", "e@x.com", "a"))
 
+    def test_ambiguous_token_over_basic_warns(self):
+        # env token + file basic pair → bearer wins, but say so (the silent
+        # override that caused a real 401 debugging session).
+        self._write_creds("REPIPE_EMAIL=e@x.com\nREPIPE_API_TOKEN=a\n")
+        buf = io.StringIO()
+        with self._env(REPIPE_TOKEN="envtok"), redirect_stderr(buf):
+            auth = http.get_auth()
+        self.assertEqual(auth, ("bearer", "envtok"))
+        self.assertIn("ignoring", buf.getvalue())
+        self.assertIn("REPIPE_TOKEN", buf.getvalue())
+
+
+def _http_error(url, code):
+    return __import__("urllib.error", fromlist=["HTTPError"]).HTTPError(
+        url, code, "msg", {}, None
+    )
+
+
+class RaiseHttp(unittest.TestCase):
+    def test_401_names_host_and_credentials_file(self):
+        with self.assertRaises(RepipeError) as cm:
+            http._raise_http(_http_error("https://api.bitbucket.org/2.0/x", 401))
+        msg = str(cm.exception)
+        self.assertIn("401", msg)
+        self.assertIn("bitbucket.org", msg)
+        self.assertIn("credentials", msg)
+
+    def test_403_github_scope_hint(self):
+        with self.assertRaises(RepipeError) as cm:
+            http._raise_http(_http_error("https://api.github.com/repos/x", 403))
+        self.assertIn("actions:write", str(cm.exception))
+
+    def test_403_bitbucket_scope_hint(self):
+        with self.assertRaises(RepipeError) as cm:
+            http._raise_http(_http_error("https://api.bitbucket.org/2.0/x", 403))
+        self.assertIn("pipeline:bitbucket", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

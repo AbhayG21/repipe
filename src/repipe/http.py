@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from . import config
@@ -63,14 +64,36 @@ def get_auth(required: bool = True):
     creds = _load_credentials_file()
 
     def pick(key):
-        return os.environ.get(key) or creds.get(key)
+        """Return (value, source) — env wins over the file."""
+        v = os.environ.get(key)
+        if v:
+            return v, "env"
+        v = creds.get(key)
+        if v:
+            return v, "file"
+        return None, None
 
-    token = pick("REPIPE_TOKEN") or pick("GITHUB_TOKEN")
+    token, tok_src = pick("REPIPE_TOKEN")
+    tok_key = "REPIPE_TOKEN"
+    if not token:
+        token, tok_src = pick("GITHUB_TOKEN")
+        tok_key = "GITHUB_TOKEN"
+    email, email_src = pick("REPIPE_EMAIL")
+    api_token, _ = pick("REPIPE_API_TOKEN")
+    has_basic = bool(email and api_token)
+
     if token:
+        # Surface the ambiguity that silently bit before: both a Bearer token
+        # and the Basic pair are present, but Bearer wins.
+        if has_basic:
+            print(
+                f"repipe: authenticating with {tok_key} ({tok_src}); ignoring the "
+                f"REPIPE_EMAIL + REPIPE_API_TOKEN pair ({email_src}). "
+                f"Unset {tok_key} to use that pair instead.",
+                file=sys.stderr,
+            )
         return ("bearer", token)
-    email = pick("REPIPE_EMAIL")
-    api_token = pick("REPIPE_API_TOKEN")
-    if email and api_token:
+    if has_basic:
         return ("basic", email, api_token)
     if required:
         raise RepipeError(
@@ -145,11 +168,36 @@ def _headers(auth, base: dict, extra=None) -> dict:
     return h
 
 
+def _host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url or "").hostname or ""
+    except ValueError:
+        return ""
+
+
+def _scope_hint(host: str) -> str:
+    if "bitbucket" in host:
+        return ("the API token needs read/write:pipeline:bitbucket "
+                "(and read:repository:bitbucket), or use a Bitbucket Access token")
+    if "github" in host:
+        return "the token needs the actions:write scope"
+    return "the token is missing a required scope"
+
+
 def _raise_http(e: urllib.error.HTTPError):
-    if e.code in (401, 403):
+    host = _host_of(getattr(e, "url", "") or getattr(e, "filename", ""))
+    where = host or "the server"
+    if e.code == 401:
         raise RepipeError(
-            f"authentication failed ({e.code}). Check REPIPE_TOKEN and its "
-            "Pipelines scopes.",
+            f"authentication failed (401): {where} rejected the credentials — "
+            "check they're valid and for this host. Note: environment variables "
+            f"override {credentials_path()}.",
+            EXIT_CONFIG,
+        )
+    if e.code == 403:
+        raise RepipeError(
+            f"authorization failed (403): authenticated to {where}, but "
+            f"{_scope_hint(host)}.",
             EXIT_CONFIG,
         )
     if e.code == 404:
