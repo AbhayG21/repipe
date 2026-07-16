@@ -21,15 +21,16 @@ class Provider:
         """Discover runnable Targets from the repo working tree."""
         raise NotImplementedError
 
-    def trigger_request(self, target_name: str, ref_name: str, variables: list):
+    def trigger_request(self, target, ref_name: str, variables: list):
         """Return (method, url, body) for a trigger — without sending it.
 
+        `target` is a Target (providers read `target.name`/`target.key`).
         `variables` is a list of (key, value) tuples. Kept separate from
         trigger() so --dry-run can show the exact request per provider.
         """
         raise NotImplementedError
 
-    def trigger(self, target_name: str, ref_name: str, variables: list, auth) -> Run:
+    def trigger(self, target, ref_name: str, variables: list, auth) -> Run:
         """Trigger a run and return the created Run."""
         raise NotImplementedError
 

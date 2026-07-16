@@ -32,6 +32,8 @@ class Target:
     name: str
     env: str                       # "qa" | "prod"
     variables: list = field(default_factory=list)
+    key: Optional[str] = None      # provider trigger handle (e.g. GH workflow
+                                   # filename); None ⇒ provider uses `name`
 
 
 @dataclass

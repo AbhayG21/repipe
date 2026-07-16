@@ -27,13 +27,20 @@ max_retries = 2
 retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 
 # ---------------------------------------------------------------------------
-# Per-repo — keyed by "<workspace>/<repo>"
+# Per-repo — keyed by "<workspace>/<repo>" (Bitbucket) or "<owner>/<repo>" (GitHub)
+# `provider` is auto-detected from the git remote on `repipe init`:
+#   bitbucket.org → "bitbucket"   ·   github.com → "github"
 # ---------------------------------------------------------------------------
 
 [repos."your-workspace/your-repo"]
-provider           = "bitbucket"   # auto-detected from the git remote on `repipe init`
+provider           = "bitbucket"
 qa_branch_prefix   = "qa-release"  # used to pick the newest QA release branch
 prod_branch_prefix = "prod-release"
+
+# A GitHub Actions repo looks the same — repipe reads workflow_dispatch inputs
+# from .github/workflows/*.yml, so `enum`/`default` often come for free.
+# [repos."your-org/your-repo"]
+# provider = "github"
 
 # ---------------------------------------------------------------------------
 # Per-variable input schema — design your own pipeline inputs here.

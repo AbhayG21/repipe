@@ -190,13 +190,13 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
     trigger, then watch/retry. Used by `run`, the interactive flow, and `rerun`.
     `confirmed=True` skips the typed-name prod gate (caller already confirmed).
     """
-    method, url, body = provider.trigger_request(target.name, ref, variables)
+    method, url, body = provider.trigger_request(target, ref, variables)
 
     if args.dry_run:
         print("DRY RUN — no request sent\n")
         print(f"{method} {url}")
         print(json.dumps(body, indent=2, ensure_ascii=False))
-        print(f"\n(pipeline '{target.name}' [{target.env}] on branch '{ref}')")
+        print(f"\n({provider.TARGET_WORD} '{target.name}' [{target.env}] on branch '{ref}')")
         return EXIT_OK
 
     if not confirmed:
@@ -211,7 +211,7 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
         args.max_retries = 0
 
     auth = get_auth(required=True)
-    run = provider.trigger(target.name, ref, variables, auth)
+    run = provider.trigger(target, ref, variables, auth)
     _announce(target.name, ref, run)
 
     if args.no_wait:
@@ -333,7 +333,7 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
         attempt += 1
         print(interactive.yellow(f"↻ #{run.number} FAILED")
               + f" — matched '{hit}', re-triggering (retry {attempt}/{args.max_retries}) …")
-        run = provider.trigger(target.name, ref, variables, auth)
+        run = provider.trigger(target, ref, variables, auth)
         _announce(target.name, ref, run)
 
 

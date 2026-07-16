@@ -38,13 +38,13 @@ class BitbucketProvider(Provider):
         with open(path, "r", encoding="utf-8") as f:
             return parse_pipelines_yml(f.read())
 
-    def trigger_request(self, target_name: str, ref_name: str, variables: list):
+    def trigger_request(self, target, ref_name: str, variables: list):
         body = {
             "target": {
                 "type": "pipeline_ref_target",
                 "ref_type": "branch",
                 "ref_name": ref_name,
-                "selector": {"type": "custom", "pattern": target_name},
+                "selector": {"type": "custom", "pattern": target.name},
             },
             "variables": [
                 {"key": k, "value": v, "secured": False} for k, v in variables
@@ -52,8 +52,8 @@ class BitbucketProvider(Provider):
         }
         return "POST", f"{self._base()}/pipelines/", body
 
-    def trigger(self, target_name: str, ref_name: str, variables: list, auth) -> Run:
-        _, url, body = self.trigger_request(target_name, ref_name, variables)
+    def trigger(self, target, ref_name: str, variables: list, auth) -> Run:
+        _, url, body = self.trigger_request(target, ref_name, variables)
         pj = api_post_json(url, body, auth)
         uuid = pj.get("uuid") or ""
         return self._run_from_json(uuid, pj)

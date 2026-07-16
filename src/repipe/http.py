@@ -13,8 +13,10 @@ def get_auth(required: bool = True):
     """Resolve credentials from the environment.
 
     Returns ("bearer", token) or ("basic", email, api_token), or None.
+    Bearer covers a Bitbucket Access token OR a GitHub token; Basic (email +
+    API token) is Bitbucket-only.
     """
-    token = os.environ.get("REPIPE_TOKEN")
+    token = os.environ.get("REPIPE_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         return ("bearer", token)
     email = os.environ.get("REPIPE_EMAIL")
@@ -23,8 +25,9 @@ def get_auth(required: bool = True):
         return ("basic", email, api_token)
     if required:
         raise RepipeError(
-            "no credentials found. Set REPIPE_TOKEN to a Bitbucket Access Token "
-            "(Pipelines read+write), or set REPIPE_EMAIL + REPIPE_API_TOKEN.",
+            "no credentials found. Set REPIPE_TOKEN (Bitbucket Access token, or "
+            "a GitHub token / GITHUB_TOKEN with actions:write), or set "
+            "REPIPE_EMAIL + REPIPE_API_TOKEN for Bitbucket.",
             EXIT_CONFIG,
         )
     return None
@@ -35,6 +38,15 @@ def _auth_header(auth) -> str:
         return "Bearer " + auth[1]
     raw = f"{auth[1]}:{auth[2]}".encode()
     return "Basic " + base64.b64encode(raw).decode()
+
+
+def _headers(auth, base: dict, extra=None) -> dict:
+    """Auth header + `base` defaults, with provider `extra` headers layered on."""
+    h = {"Authorization": _auth_header(auth)}
+    h.update(base)
+    if extra:
+        h.update(extra)
+    return h
 
 
 def _raise_http(e: urllib.error.HTTPError):
@@ -54,9 +66,9 @@ def _raise_http(e: urllib.error.HTTPError):
     raise RepipeError(f"HTTP {e.code} from server: {body}", EXIT_CONFIG)
 
 
-def api_get_json(url: str, auth) -> dict:
+def api_get_json(url: str, auth, headers=None) -> dict:
     req = urllib.request.Request(
-        url, headers={"Authorization": _auth_header(auth), "Accept": "application/json"}
+        url, headers=_headers(auth, {"Accept": "application/json"}, headers)
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -68,17 +80,17 @@ def api_get_json(url: str, auth) -> dict:
     return json.loads(data.decode() or "{}")
 
 
-def api_post_json(url: str, body: dict, auth) -> dict:
+def api_post_json(url: str, body: dict, auth, headers=None) -> dict:
     data = json.dumps(body).encode()
     req = urllib.request.Request(
         url,
         data=data,
         method="POST",
-        headers={
-            "Authorization": _auth_header(auth),
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=_headers(
+            auth,
+            {"Content-Type": "application/json", "Accept": "application/json"},
+            headers,
+        ),
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -105,9 +117,9 @@ def download_text(url: str, timeout: int = 30) -> str:
     return download_bytes(url, timeout).decode(errors="replace")
 
 
-def api_get_text(url: str, auth) -> str:
+def api_get_text(url: str, auth, headers=None) -> str:
     """GET raw text, following redirects, tolerating empty bodies."""
-    req = urllib.request.Request(url, headers={"Authorization": _auth_header(auth)})
+    req = urllib.request.Request(url, headers=_headers(auth, {}, headers))
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
             return r.read().decode(errors="replace")

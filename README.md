@@ -4,7 +4,7 @@ Trigger a CI pipeline on demand and **auto-retry it when it fails with a transie
 
 - **Zero dependencies.** A single Python 3 stdlib script. No `pip`, no `jq`.
 - **Curl-installable.** One line onto your `PATH`.
-- **Provider-agnostic core.** Bitbucket Cloud today; GitHub Actions / GitLab CI are drop-in adapters later.
+- **Provider-agnostic core.** Ships with **Bitbucket Cloud** and **GitHub Actions** adapters; GitLab CI is a drop-in adapter later.
 
 > **Status: under construction.** Shipping in phases. Done: Phase 0 (scaffold + installer) and Phase 1 (provider abstraction + Bitbucket reads — `list` / `status` / `logs`). Coming: `run` (trigger + auto-retry), the interactive flow, `init`, `rerun`.
 
@@ -34,7 +34,15 @@ Your config (`~/.config/repipe/config.toml`) and credentials are untouched — o
 
 ## Authentication
 
-repipe needs a Bitbucket credential. There are two supported kinds — pick whichever you can create. **The token never goes in a file** — you set it as an environment variable and repipe reads it at runtime.
+repipe needs a credential for your CI host, set as an environment variable (never in a file) and read at runtime.
+
+**GitHub Actions:** a token with `actions:write` (a fine-grained or classic PAT, or the `GITHUB_TOKEN` inside CI). repipe reads `REPIPE_TOKEN` or `GITHUB_TOKEN` and sends it as a Bearer token:
+
+```bash
+export REPIPE_TOKEN="<your-github-token>"   # or rely on GITHUB_TOKEN in CI
+```
+
+**Bitbucket Cloud** has two supported kinds — pick whichever you can create.
 
 ### Option A — Atlassian API token (works without admin) ✅ verified
 

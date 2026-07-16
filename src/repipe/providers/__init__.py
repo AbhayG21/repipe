@@ -12,6 +12,7 @@ from .registry import (
     PROVIDERS_BY_NAME,
 )
 from . import bitbucket  # noqa: F401  — import registers BitbucketProvider
+from . import ghactions  # noqa: F401  — import registers GitHubActionsProvider
 
 __all__ = [
     "Provider",
