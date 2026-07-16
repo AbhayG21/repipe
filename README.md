@@ -6,7 +6,9 @@ Trigger a CI pipeline on demand and **auto-retry it when it fails with a transie
 - **Curl-installable.** One line onto your `PATH`.
 - **Provider-agnostic core.** Ships with **Bitbucket Cloud** and **GitHub Actions** adapters; GitLab CI is a drop-in adapter later.
 
-> **Status: under construction.** Shipping in phases. Done: Phase 0 (scaffold + installer) and Phase 1 (provider abstraction + Bitbucket reads — `list` / `status` / `logs`). Coming: `run` (trigger + auto-retry), the interactive flow, `init`, `rerun`.
+> **📘 Docs & showcase → [abhayg21.github.io/repipe](https://abhayg21.github.io/repipe/)**
+>
+> Everything's shipped: `run` (trigger + watch + auto-retry), the interactive flow, `init` / `rerun` / `list` / `status` / `logs` / `suggestions` / `upgrade`, with Bitbucket Cloud and GitHub Actions adapters.
 
 ## Install
 
