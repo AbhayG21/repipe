@@ -4,7 +4,6 @@ import argparse
 import getpass
 import json
 import os
-import re
 import sys
 import time
 
@@ -573,7 +572,8 @@ def cmd_init(args) -> int:
 
 # Where `repipe upgrade` fetches from. Overridable so forks can self-update.
 UPGRADE_REPO = os.environ.get("REPIPE_UPGRADE_REPO", "AbhayG21/repipe")
-UPGRADE_REF = os.environ.get("REPIPE_UPGRADE_REF", "main")
+# Pin to a specific release tag, e.g. REPIPE_UPGRADE_VERSION=v1.6.0
+UPGRADE_VERSION = os.environ.get("REPIPE_UPGRADE_VERSION")
 
 
 def _version_tuple(v):
@@ -583,14 +583,24 @@ def _version_tuple(v):
     return tuple(parts)
 
 
-def _latest_version(raw_base):
-    """Read __version__ from the published source, or None if unavailable."""
+def _latest_release(repo):
+    """Return (version, asset_url) for the repo's latest GitHub Release, or
+    (None, None). Reads the public Releases API unauthenticated — it never sends
+    the user's token (which may be a Bitbucket credential), and the API is fresh
+    (no raw/branch CDN lag)."""
     try:
-        txt = download_text(f"{raw_base}/src/repipe/__init__.py")
-    except RepipeError:
-        return None
-    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', txt)
-    return m.group(1) if m else None
+        data = json.loads(download_text(
+            f"https://api.github.com/repos/{repo}/releases/latest") or "{}")
+    except (RepipeError, ValueError):
+        return None, None
+    tag = data.get("tag_name") or ""
+    version = tag[1:] if tag.startswith("v") else tag
+    asset_url = None
+    for asset in data.get("assets") or []:
+        if asset.get("name") == "repipe":
+            asset_url = asset.get("browser_download_url")
+            break
+    return (version or None), asset_url
 
 
 def _self_path():
@@ -607,23 +617,35 @@ def cmd_upgrade(args) -> int:
     import subprocess
     import tempfile
 
-    raw = os.environ.get("REPIPE_UPGRADE_BASE") or \
-        f"https://raw.githubusercontent.com/{UPGRADE_REPO}/{UPGRADE_REF}"
-    latest = _latest_version(raw)
     current = __version__
-    behind = bool(latest) and _version_tuple(latest) > _version_tuple(current)
 
-    if latest:
-        status = "update available" if behind else "up to date"
-        print(f"installed: {current}   latest ({UPGRADE_REF}): {latest}   → {status}")
+    if UPGRADE_VERSION:
+        # Pinned to a specific release tag — reinstall it regardless of version.
+        tag = UPGRADE_VERSION
+        latest = tag[1:] if tag.startswith("v") else tag
+        asset_url = f"https://github.com/{UPGRADE_REPO}/releases/download/{tag}/repipe"
+        behind = True
+        print(f"installed: {current}   pinned release: {latest}")
     else:
-        print(f"installed: {current}   (could not read latest version from {UPGRADE_REF})")
+        latest, asset_url = _latest_release(UPGRADE_REPO)
+        behind = bool(latest) and _version_tuple(latest) > _version_tuple(current)
+        if latest:
+            status = "update available" if behind else "up to date"
+            print(f"installed: {current}   latest release: {latest}   → {status}")
+        else:
+            print(f"installed: {current}   (no published release found for {UPGRADE_REPO})")
 
     if args.check:
         return EXIT_OK
-    if latest and not behind and not args.force:
+    if not UPGRADE_VERSION and latest and not behind and not args.force:
         print("nothing to do (use --force to reinstall anyway).")
         return EXIT_OK
+    if not asset_url:
+        raise RepipeError(
+            f"no downloadable release asset found for {UPGRADE_REPO} — "
+            "re-run the install one-liner instead.",
+            EXIT_CONFIG,
+        )
 
     target = _self_path()
     if not os.path.isfile(target):
@@ -633,8 +655,8 @@ def cmd_upgrade(args) -> int:
             EXIT_CONFIG,
         )
 
-    print(f"downloading {raw}/repipe …")
-    data = download_bytes(f"{raw}/repipe")
+    print(f"downloading {asset_url} …")
+    data = download_bytes(asset_url)
 
     # Write next to the target (same filesystem → atomic replace), verify, swap.
     fd, tmp = tempfile.mkstemp(prefix=".repipe-upgrade-", dir=os.path.dirname(target) or ".")

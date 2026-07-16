@@ -16,21 +16,23 @@ Trigger a CI pipeline on demand and **auto-retry it when it fails with a transie
 curl -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | bash
 ```
 
-This installs `repipe` into `~/.local/bin` (or `/usr/local/bin`) and checks for `python3`. If the install dir isn't on your `PATH`, the installer prints the `export PATH=…` line to add.
+This installs `repipe` into `~/.local/bin` (or `/usr/local/bin`) and checks for `python3`. If the install dir isn't on your `PATH`, the installer prints the `export PATH=…` line to add. The binary is pulled from the **latest [GitHub Release](https://github.com/AbhayG21/repipe/releases)** — pin a specific one with `REPIPE_VERSION=v1.6.0` before the pipe.
 
-To install from a local clone (before the repo is published):
+To install from a local clone:
 
 ```bash
 git clone <this-repo> && cd repipe
-bash install.sh
+bash install.sh          # uses the built ./repipe next to the script
 ```
 
 ## Upgrading
 
 ```bash
-repipe upgrade            # fetch the latest published build and replace itself
-repipe upgrade --check    # just report installed vs latest
+repipe upgrade            # fetch the latest release and replace itself
+repipe upgrade --check    # just report installed vs latest release
 ```
+
+Upgrades track the latest **GitHub Release** (not `main`), read straight from the Releases API — so `--check` is always current, with no CDN lag. Pin an exact version with `REPIPE_UPGRADE_VERSION=v1.6.0 repipe upgrade`.
 
 Your config (`~/.config/repipe/config.toml`) and credentials are untouched — only the binary is swapped (atomically, after verifying the download runs). Re-running the install one-liner does the same thing.
 

@@ -70,12 +70,23 @@ if [ -n "$SRC_LOCAL" ]; then
   info "from $SRC_LOCAL"
   cp "$SRC_LOCAL" "$DEST"
 else
+  # Remote: pull the binary from the latest GitHub Release (the counted, stable
+  # channel). Pin a specific version with REPIPE_VERSION=v1.6.0. If the release
+  # download fails (e.g. none published yet), fall back to raw main.
+  if [ -n "${REPIPE_VERSION:-}" ]; then
+    ASSET_URL="https://github.com/${REPO}/releases/download/${REPIPE_VERSION}/repipe"
+  else
+    ASSET_URL="https://github.com/${REPO}/releases/latest/download/repipe"
+  fi
   bold "Installing repipe"
-  info "from $RAW_BASE/repipe"
-  if ! curl -fsSL "$RAW_BASE/repipe" -o "$DEST"; then
-    err "Download failed from $RAW_BASE/repipe"
-    info "Check the REPO/REF at the top of this script, or your network."
-    exit 1
+  info "from $ASSET_URL"
+  if ! curl -fsSL "$ASSET_URL" -o "$DEST"; then
+    warn "release download failed — falling back to $RAW_BASE/repipe"
+    if ! curl -fsSL "$RAW_BASE/repipe" -o "$DEST"; then
+      err "Download failed from the release and $RAW_BASE/repipe"
+      info "Check the REPO at the top of this script, or your network."
+      exit 1
+    fi
   fi
 fi
 

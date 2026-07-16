@@ -1,0 +1,47 @@
+name: Release
+
+# Cut a release by pushing a version tag:
+#   git tag v1.6.0 && git push origin v1.6.0
+# This builds repipe reproducibly, verifies the tag matches __version__, and
+# publishes a GitHub Release with the `repipe` binary attached. install.sh and
+# `repipe upgrade` pull from the latest release, so this is what users receive.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write        # required for `gh release create`
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the reproducible zipapp
+        run: bash build.sh
+
+      - name: Tag must match __version__
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(python3 -c 'import re,pathlib; print(re.search(r"__version__\s*=\s*\"([^\"]+)\"", pathlib.Path("src/repipe/__init__.py").read_text()).group(1))')"
+          echo "tag=$tag  __version__=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match __version__ $ver — bump the version before tagging."
+            exit 1
+          fi
+
+      - name: Smoke-test the built binary
+        run: ./repipe version
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" repipe \
+            --title "repipe $GITHUB_REF_NAME" \
+            --generate-notes
