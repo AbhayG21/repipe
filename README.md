@@ -23,6 +23,15 @@ git clone <this-repo> && cd repipe
 bash install.sh
 ```
 
+## Upgrading
+
+```bash
+repipe upgrade            # fetch the latest published build and replace itself
+repipe upgrade --check    # just report installed vs latest
+```
+
+Your config (`~/.config/repipe/config.toml`) and credentials are untouched — only the binary is swapped (atomically, after verifying the download runs). Re-running the install one-liner does the same thing.
+
 ## Authentication
 
 repipe needs a Bitbucket credential. There are two supported kinds — pick whichever you can create. **The token never goes in a file** — you set it as an environment variable and repipe reads it at runtime.
@@ -74,6 +83,7 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
 repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
 repipe suggestions                      # print suggested retry patterns to copy into config
+repipe upgrade [--check]                # update to the latest published build (--check just reports)
 repipe rerun                            # repeat the last invocation for this repo
 repipe list                             # list runnable pipelines (offline, from the yml)
 repipe status <uuid|build#>             # state of a run

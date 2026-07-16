@@ -90,6 +90,21 @@ def api_post_json(url: str, body: dict, auth) -> dict:
     return {}
 
 
+def download_bytes(url: str, timeout: int = 30) -> bytes:
+    """GET raw bytes from a public URL (no auth) — used by `repipe upgrade`."""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        raise RepipeError(f"download failed: HTTP {e.code} for {url}", EXIT_CONFIG)
+    except urllib.error.URLError as e:
+        raise RepipeError(f"network error: {e.reason}", EXIT_CONFIG)
+
+
+def download_text(url: str, timeout: int = 30) -> str:
+    return download_bytes(url, timeout).decode(errors="replace")
+
+
 def api_get_text(url: str, auth) -> str:
     """GET raw text, following redirects, tolerating empty bodies."""
     req = urllib.request.Request(url, headers={"Authorization": _auth_header(auth)})

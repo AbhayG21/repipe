@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import os
+import re
 import sys
 import time
 
@@ -17,7 +19,7 @@ from .errors import (
 from . import config
 from . import interactive
 from .gitutil import detect_repo, branch_candidates, run_git
-from .http import get_auth
+from .http import get_auth, download_bytes, download_text
 from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
@@ -529,6 +531,99 @@ def cmd_init(args) -> int:
     return EXIT_OK
 
 
+# Where `repipe upgrade` fetches from. Overridable so forks can self-update.
+UPGRADE_REPO = os.environ.get("REPIPE_UPGRADE_REPO", "AbhayG21/repipe")
+UPGRADE_REF = os.environ.get("REPIPE_UPGRADE_REF", "main")
+
+
+def _version_tuple(v):
+    parts = []
+    for p in str(v).split("."):
+        parts.append(int(p) if p.isdigit() else 0)
+    return tuple(parts)
+
+
+def _latest_version(raw_base):
+    """Read __version__ from the published source, or None if unavailable."""
+    try:
+        txt = download_text(f"{raw_base}/src/repipe/__init__.py")
+    except RepipeError:
+        return None
+    m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', txt)
+    return m.group(1) if m else None
+
+
+def _self_path():
+    """Absolute path of the currently-running repipe executable."""
+    import shutil
+    cand = sys.argv[0]
+    if os.sep in cand or (os.altsep and os.altsep in cand):
+        return os.path.realpath(cand)
+    found = shutil.which(cand) or shutil.which("repipe")
+    return os.path.realpath(found) if found else os.path.realpath(cand)
+
+
+def cmd_upgrade(args) -> int:
+    import subprocess
+    import tempfile
+
+    raw = os.environ.get("REPIPE_UPGRADE_BASE") or \
+        f"https://raw.githubusercontent.com/{UPGRADE_REPO}/{UPGRADE_REF}"
+    latest = _latest_version(raw)
+    current = __version__
+    behind = bool(latest) and _version_tuple(latest) > _version_tuple(current)
+
+    if latest:
+        status = "update available" if behind else "up to date"
+        print(f"installed: {current}   latest ({UPGRADE_REF}): {latest}   → {status}")
+    else:
+        print(f"installed: {current}   (could not read latest version from {UPGRADE_REF})")
+
+    if args.check:
+        return EXIT_OK
+    if latest and not behind and not args.force:
+        print("nothing to do (use --force to reinstall anyway).")
+        return EXIT_OK
+
+    target = _self_path()
+    if not os.path.isfile(target):
+        raise RepipeError(
+            f"can't locate the installed repipe binary ({target}). "
+            "Re-run the install one-liner instead.",
+            EXIT_CONFIG,
+        )
+
+    print(f"downloading {raw}/repipe …")
+    data = download_bytes(f"{raw}/repipe")
+
+    # Write next to the target (same filesystem → atomic replace), verify, swap.
+    fd, tmp = tempfile.mkstemp(prefix=".repipe-upgrade-", dir=os.path.dirname(target) or ".")
+    try:
+        os.write(fd, data)
+        os.close(fd)
+        os.chmod(tmp, 0o755)
+        check = subprocess.run([sys.executable, tmp, "version"],
+                               capture_output=True, text=True)
+        if check.returncode != 0:
+            raise RepipeError(
+                "downloaded build failed to run; keeping your current version.",
+                EXIT_CONFIG,
+            )
+        os.replace(tmp, target)
+    except PermissionError:
+        raise RepipeError(f"cannot write {target} (permission denied).", EXIT_CONFIG)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+    newver = check.stdout.strip().split()[-1] if check.stdout.strip() else "?"
+    print(f"✓ upgraded {current} → {newver}   ({target})")
+    return EXIT_OK
+
+
 def cmd_suggestions(args) -> int:
     print("repipe applies NO retry patterns by default — you choose them.\n")
     print("Suggested patterns (common transient/infra errors):")
@@ -641,6 +736,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("suggestions",
                    help="print suggested retry patterns to copy into config")
 
+    p_up = sub.add_parser("upgrade", help="update repipe to the latest published build")
+    p_up.add_argument("--check", action="store_true",
+                      help="only report whether an update is available")
+    p_up.add_argument("--force", action="store_true",
+                      help="reinstall even if already up to date")
+
     p_rerun = sub.add_parser("rerun", parents=[common],
                              help="repeat the last invocation for this repo")
     p_rerun.add_argument("--dry-run", action="store_true",
@@ -673,6 +774,8 @@ def main(argv=None) -> int:
             return cmd_init(args)
         if args.command == "suggestions":
             return cmd_suggestions(args)
+        if args.command == "upgrade":
+            return cmd_upgrade(args)
         if args.command == "rerun":
             return cmd_rerun(args)
     except RepipeError as e:
