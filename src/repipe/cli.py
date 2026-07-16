@@ -725,33 +725,36 @@ def _prompt_credential(name):
         token = _ask_token("paste the token")
         return {"REPIPE_TOKEN": token}, ("bearer", token)
 
-    # Bitbucket (or an unknown host): two ways in — describe both plainly.
-    print("  How do you want to authenticate?")
+    # Bitbucket (or an unknown host): two ways in — arrow-key pick, then entry.
     if name == "bitbucket":
-        print("    " + interactive.bold("1) API token")
-              + interactive.dim("  — recommended; works without admin. Enter your email + token."))
-        print("    " + interactive.bold("2) Access token")
-              + interactive.dim("  — a repo/workspace token (needs admin). Enter just the token."))
-        print(interactive.dim(
-            "    API token   → https://id.atlassian.com/manage-profile/security/api-tokens"
-            "  (scopes: read/write:pipeline:bitbucket)"))
-        print(interactive.dim(
-            "    Access token → Repo or Workspace settings → Access tokens (Pipelines: read + write)"))
+        methods = [
+            {"id": "api", "label": "Atlassian API token",
+             "desc": "works without admin · email + token",
+             "url": "https://id.atlassian.com/manage-profile/security/api-tokens"
+                    "  (scopes: read/write:pipeline:bitbucket)"},
+            {"id": "access", "label": "Access token",
+             "desc": "repo/workspace token · needs admin",
+             "url": "Repo/Workspace settings → Access tokens (Pipelines: read + write)"},
+        ]
     else:
-        print("    " + interactive.bold("1) A single token")
-              + interactive.dim("  — a GitHub PAT or a Bitbucket Access token. Enter just the token."))
-        print("    " + interactive.bold("2) Bitbucket API token")
-              + interactive.dim("  — enter your Atlassian email + API token."))
+        methods = [
+            {"id": "access", "label": "A single token",
+             "desc": "GitHub PAT or Bitbucket access token", "url": None},
+            {"id": "api", "label": "Bitbucket API token",
+             "desc": "Atlassian email + API token", "url": None},
+        ]
 
-    choice = (input("  choose 1 or 2 [default 1]: ").strip() or "1")
-    # Option 1 differs by host: Bitbucket→email+token(basic); unknown→bearer token.
-    if name == "bitbucket":
-        wants_basic = (choice != "2")
-    else:
-        wants_basic = (choice == "2")
+    choice = interactive.pick(
+        "How do you want to authenticate?",
+        methods,
+        to_str=lambda m: f"{m['label']}  {interactive.dim('— ' + m['desc'])}",
+        allow_back=False,
+    )
+    if choice.get("url"):
+        print(interactive.dim("  get it at: " + choice["url"]))
 
-    if wants_basic:
-        email = input("  Atlassian account email: ").strip()
+    if choice["id"] == "api":
+        email = interactive.ask("Atlassian account email", allow_back=False)
         if not email:
             raise RepipeError("email is required for the API-token method.", EXIT_CONFIG)
         token = _ask_token("paste the API token")
