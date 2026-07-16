@@ -705,6 +705,61 @@ def cmd_rerun(args) -> int:
     return _finish_run(provider, target, ref, variables, rargs)
 
 
+def _ask_token(label) -> str:
+    token = getpass.getpass(f"  {label} (input hidden): ").strip()
+    if not token:
+        raise RepipeError("no token entered — nothing saved.", EXIT_CONFIG)
+    return token
+
+
+def _prompt_credential(name):
+    """Interactively collect a credential, tailored to the detected host.
+    Returns (mapping, auth). `name` is the provider name or None (unknown)."""
+    if name == "github":
+        # GitHub authenticates with a single Bearer token — no email variant.
+        print("  GitHub needs a personal access token with the "
+              + interactive.bold("actions:write") + " scope (to trigger workflows).")
+        print(interactive.dim("  create one → https://github.com/settings/tokens"))
+        print(interactive.dim("    fine-grained: Actions = Read and write   ·   "
+                              "classic: repo + workflow"))
+        token = _ask_token("paste the token")
+        return {"REPIPE_TOKEN": token}, ("bearer", token)
+
+    # Bitbucket (or an unknown host): two ways in — describe both plainly.
+    print("  How do you want to authenticate?")
+    if name == "bitbucket":
+        print("    " + interactive.bold("1) API token")
+              + interactive.dim("  — recommended; works without admin. Enter your email + token."))
+        print("    " + interactive.bold("2) Access token")
+              + interactive.dim("  — a repo/workspace token (needs admin). Enter just the token."))
+        print(interactive.dim(
+            "    API token   → https://id.atlassian.com/manage-profile/security/api-tokens"
+            "  (scopes: read/write:pipeline:bitbucket)"))
+        print(interactive.dim(
+            "    Access token → Repo or Workspace settings → Access tokens (Pipelines: read + write)"))
+    else:
+        print("    " + interactive.bold("1) A single token")
+              + interactive.dim("  — a GitHub PAT or a Bitbucket Access token. Enter just the token."))
+        print("    " + interactive.bold("2) Bitbucket API token")
+              + interactive.dim("  — enter your Atlassian email + API token."))
+
+    choice = (input("  choose 1 or 2 [default 1]: ").strip() or "1")
+    # Option 1 differs by host: Bitbucket→email+token(basic); unknown→bearer token.
+    if name == "bitbucket":
+        wants_basic = (choice != "2")
+    else:
+        wants_basic = (choice == "2")
+
+    if wants_basic:
+        email = input("  Atlassian account email: ").strip()
+        if not email:
+            raise RepipeError("email is required for the API-token method.", EXIT_CONFIG)
+        token = _ask_token("paste the API token")
+        return {"REPIPE_EMAIL": email, "REPIPE_API_TOKEN": token}, ("basic", email, token)
+    token = _ask_token("paste the token")
+    return {"REPIPE_TOKEN": token}, ("bearer", token)
+
+
 def cmd_login(args) -> int:
     """Prompt for a token (hidden) and save it to the credentials file, 0o600.
     With --verify, check it against the current repo's host before saving."""
@@ -721,23 +776,12 @@ def cmd_login(args) -> int:
             f"{path} already exists — pass --force to overwrite.", EXIT_CONFIG
         )
 
-    where = f" (detected {provider.NAME})" if provider else ""
-    print(interactive.bold(f"repipe login{where}"))
-    kind = (input("  credential — [t]oken, or bitbucket [e]mail+api-token? [t]: ")
-            .strip().lower() or "t")
-    if kind.startswith("e"):
-        email = input("  Bitbucket email: ").strip()
-        token = getpass.getpass("  Atlassian API token (hidden): ").strip()
-        if not email or not token:
-            raise RepipeError("email and API token are both required.", EXIT_CONFIG)
-        mapping = {"REPIPE_EMAIL": email, "REPIPE_API_TOKEN": token}
-        auth = ("basic", email, token)
-    else:
-        token = getpass.getpass("  Token (hidden): ").strip()
-        if not token:
-            raise RepipeError("no token entered.", EXIT_CONFIG)
-        mapping = {"REPIPE_TOKEN": token}
-        auth = ("bearer", token)
+    name = provider.NAME if provider else None
+    print(interactive.bold("repipe login"))
+    if name:
+        print(interactive.dim(f"  detected {name} · {workspace}/{repo}"))
+    print()
+    mapping, auth = _prompt_credential(name)
 
     if args.verify:
         if not provider:
