@@ -11,7 +11,7 @@ import urllib.parse
 
 from ..errors import RepipeError, EXIT_CONFIG
 from ..ghyml import parse_workflows
-from ..http import api_get_json, api_get_text, api_post_json
+from ..http import api_get_json, api_get_text, api_post_json, probe
 from ..model import Run, RunState, Step
 from .base import Provider
 from .registry import register_provider
@@ -137,3 +137,6 @@ class GitHubActionsProvider(Provider):
         return api_get_text(
             f"{self._base()}/actions/jobs/{step.uuid}/logs", auth, headers=GH_HEADERS
         )
+
+    def verify_auth(self, auth):
+        return probe(self._base(), auth, headers=GH_HEADERS)

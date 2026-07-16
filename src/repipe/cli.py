@@ -1,6 +1,7 @@
 """argparse wiring + command handlers + main()."""
 
 import argparse
+import getpass
 import json
 import os
 import re
@@ -19,7 +20,9 @@ from .errors import (
 from . import config
 from . import interactive
 from .gitutil import detect_repo, branch_candidates, run_git
-from .http import get_auth, download_bytes, download_text
+from .http import (
+    get_auth, download_bytes, download_text, credentials_path, save_credentials,
+)
 from .model import RunState
 from .output import fmt_var, state_symbol
 from .providers import choose_provider
@@ -702,6 +705,75 @@ def cmd_rerun(args) -> int:
     return _finish_run(provider, target, ref, variables, rargs)
 
 
+def cmd_login(args) -> int:
+    """Prompt for a token (hidden) and save it to the credentials file, 0o600.
+    With --verify, check it against the current repo's host before saving."""
+    provider = None
+    try:
+        host, workspace, repo, _ = detect_repo(args.path)
+        provider = choose_provider(host, args.provider)(workspace, repo)
+    except RepipeError:
+        pass  # not in a recognized repo — fine unless --verify
+
+    path = credentials_path()
+    if os.path.exists(path) and not args.force:
+        raise RepipeError(
+            f"{path} already exists — pass --force to overwrite.", EXIT_CONFIG
+        )
+
+    where = f" (detected {provider.NAME})" if provider else ""
+    print(interactive.bold(f"repipe login{where}"))
+    kind = (input("  credential — [t]oken, or bitbucket [e]mail+api-token? [t]: ")
+            .strip().lower() or "t")
+    if kind.startswith("e"):
+        email = input("  Bitbucket email: ").strip()
+        token = getpass.getpass("  Atlassian API token (hidden): ").strip()
+        if not email or not token:
+            raise RepipeError("email and API token are both required.", EXIT_CONFIG)
+        mapping = {"REPIPE_EMAIL": email, "REPIPE_API_TOKEN": token}
+        auth = ("basic", email, token)
+    else:
+        token = getpass.getpass("  Token (hidden): ").strip()
+        if not token:
+            raise RepipeError("no token entered.", EXIT_CONFIG)
+        mapping = {"REPIPE_TOKEN": token}
+        auth = ("bearer", token)
+
+    if args.verify:
+        if not provider:
+            raise RepipeError(
+                "--verify must run inside a recognized repo (it needs a host + "
+                "repo to make a read-only check). Re-run there, or drop --verify.",
+                EXIT_CONFIG,
+            )
+        code = provider.verify_auth(auth)
+        if code == 200:
+            print(interactive.green("  ✓ token verified"))
+        elif code == 401:
+            if not args.force:
+                raise RepipeError(
+                    "token rejected (401) — not saving. Re-run with --force to "
+                    "save it anyway.",
+                    EXIT_CONFIG,
+                )
+            print(interactive.yellow("  ⚠ token rejected (401) — saving anyway (--force)"))
+        elif code == 403:
+            print(interactive.yellow(
+                "  ⚠ authenticated but missing a scope (403) — saving; check the "
+                "token's Pipelines/Actions scopes"))
+        elif code == 0:
+            print(interactive.yellow("  ⚠ couldn't reach the host to verify — saving anyway"))
+        elif code is None:
+            print(interactive.dim("  (provider can't verify; saving without a check)"))
+        else:
+            print(interactive.yellow(f"  ⚠ unexpected status {code} — saving anyway"))
+
+    saved = save_credentials(mapping)
+    print(f"  wrote {saved} (chmod 600)")
+    print(interactive.dim("  the environment still overrides this file when set."))
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repipe",
@@ -769,6 +841,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--force", action="store_true",
                        help="override conservative prod retry policy")
 
+    p_login = sub.add_parser("login", parents=[common],
+                             help="save a CI token to ~/.config/repipe/credentials")
+    p_login.add_argument("--verify", action="store_true",
+                         help="check the token with a read-only API call before "
+                              "saving (run inside a repo)")
+    p_login.add_argument("--force", action="store_true",
+                         help="overwrite an existing file / save despite a failed verify")
+
     sub.add_parser("init", parents=[common],
                    help="scaffold ~/.config/repipe/config.toml from this repo")
     sub.add_parser("suggestions",
@@ -808,6 +888,8 @@ def main(argv=None) -> int:
             return cmd_logs(args)
         if args.command == "run":
             return cmd_run(args)
+        if args.command == "login":
+            return cmd_login(args)
         if args.command == "init":
             return cmd_init(args)
         if args.command == "suggestions":

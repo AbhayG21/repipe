@@ -15,4 +15,4 @@ Package map:
   cli         argparse wiring + command handlers + main()
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"

@@ -3,34 +3,130 @@
 import base64
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 
+from . import config
 from .errors import RepipeError, EXIT_CONFIG
+
+_CRED_KEYS = ("REPIPE_TOKEN", "GITHUB_TOKEN", "REPIPE_EMAIL", "REPIPE_API_TOKEN")
+
+
+def credentials_path() -> str:
+    return os.path.join(config.config_dir(), "credentials")
+
+
+def _load_credentials_file() -> dict:
+    """Read ~/.config/repipe/credentials — a dotenv-style KEY=VALUE file, the
+    non-env fallback for tokens. Returns {} if it's absent or unreadable.
+
+    Warns (never fails) if the file is group/other-readable, since it holds a
+    live token; suggests `chmod 600`.
+    """
+    path = credentials_path()
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    if st.st_mode & 0o077:
+        print(
+            f"repipe: warning — {path} is readable by others; run "
+            f"`chmod 600 {path}`.",
+            file=sys.stderr,
+        )
+    creds = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key in _CRED_KEYS and value:
+                    creds[key] = value
+    except OSError:
+        return {}
+    return creds
 
 
 def get_auth(required: bool = True):
-    """Resolve credentials from the environment.
+    """Resolve credentials: environment first, then ~/.config/repipe/credentials.
 
     Returns ("bearer", token) or ("basic", email, api_token), or None.
     Bearer covers a Bitbucket Access token OR a GitHub token; Basic (email +
-    API token) is Bitbucket-only.
+    API token) is Bitbucket-only. The env always wins over the file, so CI's
+    injected GITHUB_TOKEN or an ad-hoc export overrides a saved file.
     """
-    token = os.environ.get("REPIPE_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    creds = _load_credentials_file()
+
+    def pick(key):
+        return os.environ.get(key) or creds.get(key)
+
+    token = pick("REPIPE_TOKEN") or pick("GITHUB_TOKEN")
     if token:
         return ("bearer", token)
-    email = os.environ.get("REPIPE_EMAIL")
-    api_token = os.environ.get("REPIPE_API_TOKEN")
+    email = pick("REPIPE_EMAIL")
+    api_token = pick("REPIPE_API_TOKEN")
     if email and api_token:
         return ("basic", email, api_token)
     if required:
         raise RepipeError(
             "no credentials found. Set REPIPE_TOKEN (Bitbucket Access token, or "
             "a GitHub token / GITHUB_TOKEN with actions:write), or set "
-            "REPIPE_EMAIL + REPIPE_API_TOKEN for Bitbucket.",
+            "REPIPE_EMAIL + REPIPE_API_TOKEN for Bitbucket — as environment "
+            f"variables or in {credentials_path()} (chmod 600).",
             EXIT_CONFIG,
         )
     return None
+
+
+def save_credentials(mapping: dict) -> str:
+    """Write the given credential vars to the credentials file, mode 0o600.
+
+    Written atomically (temp file + rename) so a token never lands in a
+    partially-written or world-readable file. Returns the path.
+    """
+    import tempfile
+
+    os.makedirs(config.config_dir(), exist_ok=True)
+    path = credentials_path()
+    body = ["# repipe credentials — keep private (chmod 600). Never commit.\n"]
+    for key in _CRED_KEYS:
+        if mapping.get(key):
+            body.append(f"{key}={mapping[key]}\n")
+
+    fd, tmp = tempfile.mkstemp(dir=config.config_dir(), prefix=".cred-")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("".join(body))
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path
+
+
+def probe(url: str, auth, headers=None) -> int:
+    """GET `url` with `auth` and return the HTTP status code (0 on network
+    error). Unlike api_get_*, this never raises on 4xx/5xx — it's for
+    verifying a credential (200 ok, 401 rejected, 403 missing scope)."""
+    req = urllib.request.Request(
+        url, headers=_headers(auth, {"Accept": "application/json"}, headers)
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return getattr(r, "status", 200) or 200
+    except urllib.error.HTTPError as e:
+        return e.code
+    except urllib.error.URLError:
+        return 0
 
 
 def _auth_header(auth) -> str:

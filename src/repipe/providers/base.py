@@ -46,6 +46,13 @@ class Provider:
         """Fetch a step's raw log (may be empty)."""
         raise NotImplementedError
 
+    def verify_auth(self, auth):
+        """Return the HTTP status of a cheap read-only call proving the
+        credential works (200 ok · 401 rejected · 403 missing scope · 0
+        unreachable), or None if this provider can't verify. Used by
+        `repipe login --verify`."""
+        return None
+
     # --- generic, provider-neutral (built on the methods above) ---
 
     def failed_step_logs(self, run: Run, auth):

@@ -4,7 +4,7 @@ import os
 import urllib.parse
 
 from ..errors import RepipeError, EXIT_CONFIG
-from ..http import api_get_json, api_get_text, api_post_json
+from ..http import api_get_json, api_get_text, api_post_json, probe
 from ..model import Run, RunState, Step
 from ..ymlparse import parse_pipelines_yml
 from .base import Provider
@@ -142,3 +142,6 @@ class BitbucketProvider(Provider):
         return api_get_text(
             f"{self._base()}/pipelines/{uuid}/steps/{suuid}/log", auth
         )
+
+    def verify_auth(self, auth):
+        return probe(f"{self._base()}/pipelines/?pagelen=1", auth)

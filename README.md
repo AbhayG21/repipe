@@ -74,6 +74,24 @@ A machine credential bound to a repo/workspace (not a person), sent as `Authoriz
 
 > **App passwords are not supported** — they're end-of-life. Use one of the above.
 
+### Credentials file (set it once)
+
+Rather than re-exporting every shell, drop your token in `~/.config/repipe/credentials` — a simple `KEY=VALUE` file using the same names as the env vars. repipe reads it as a fallback; **environment variables always win** (so CI's `GITHUB_TOKEN` or an ad-hoc `export` still overrides it).
+
+```bash
+install -m 600 /dev/null ~/.config/repipe/credentials   # create it locked-down
+cat > ~/.config/repipe/credentials <<'EOF'
+REPIPE_TOKEN=ghp_your_github_or_bitbucket_token
+# …or, for Bitbucket's API-token pair:
+# REPIPE_EMAIL=you@yourcompany.com
+# REPIPE_API_TOKEN=your_api_token
+EOF
+```
+
+`chmod 600` it (repipe warns if it's readable by others). It's already covered by `.gitignore`.
+
+Or let repipe write it for you — `repipe login` prompts for the token with hidden input and saves the file `0o600`. Add `--verify` (inside a repo) to confirm the token works with one read-only API call before saving.
+
 ### Verify your credential
 
 Confirm auth without triggering anything — a read-only call:
@@ -91,6 +109,7 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 
 ```bash
 repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
+repipe login [--verify]                 # save a CI token to the credentials file (hidden input)
 repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
 repipe suggestions                      # print suggested retry patterns to copy into config
 repipe upgrade [--check]                # update to the latest published build (--check just reports)
