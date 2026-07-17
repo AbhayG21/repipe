@@ -29,6 +29,11 @@ max_retries = 2
 # default — it adds one API call per poll. Same as passing --notify-steps.
 # notify_steps = false
 
+# Watch loop tuning (read by the interactive flow and `rerun`; `run` takes these
+# as --poll-interval / --timeout flags instead). Seconds.
+# poll_interval = 20
+# timeout = 3600
+
 # Retry patterns — YOU choose these. repipe applies NONE by default; it only
 # re-triggers a failed run whose log matches a pattern you list here (or pass
 # with --retry-on). No pattern configured => no retries.

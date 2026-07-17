@@ -112,6 +112,7 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 ```bash
 repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
 repipe login [--verify]                 # save a CI token to the credentials file (hidden input)
+repipe config [--show]                  # view/edit settings via a menu (--show just prints them)
 repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
 repipe suggestions                      # print suggested retry patterns to copy into config
 repipe upgrade [--check]                # update to the latest published build (--check just reports)
@@ -139,6 +140,10 @@ repipe run -p deploy-qa -b qa-release-2024-05-29 \
 ```
 
 Bad or missing variables are caught locally in ~1s (before any API call), using the per-repo variable schema you define in config: `enum` values, `required` flags, regex `pattern`s, and a `no_spaces_unless` cross-field rule.
+
+### Editing settings
+
+`repipe config` opens an arrow-key menu (same UX as the interactive run flow) to view and change settings without hand-editing TOML. The top level covers the globals: retry patterns (add from suggestions, add custom, remove), max retries, match mode, poll interval, timeout, desktop notifications, per-step notifications, and your email. **Repo settings ›** edits the per-repo basics — provider, QA branch prefix, prod branch prefix — for the repo it detects from the working tree (or, if you're not in one, a repo you pick from those already configured). Under it, **Variables ›** is a full editor for the per-repo input schema: pick a variable (or add one) and set its `enum` (add/remove allowed values), `default`, `required`, `pattern`, `autofill`, `remember`, `no_spaces_unless`, and `hint` — the same table you'd otherwise hand-write. `repipe config --show` prints the current effective globals and exits (no terminal needed, so it works over a pipe / in CI).
 
 ### Auto-retry (opt-in — you define the patterns)
 

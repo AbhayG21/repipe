@@ -25,7 +25,7 @@ from .http import (
 )
 from .model import RunState
 from .output import fmt_var, state_symbol
-from .providers import choose_provider
+from .providers import choose_provider, PROVIDERS_BY_NAME
 from .retry import build_patterns, first_match, SUGGESTED_RETRY_PATTERNS
 from .varschema import resolve_variables, allowed_values_for
 
@@ -590,6 +590,8 @@ def cmd_interactive(args) -> int:
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=cfg.get("retry_on"),
+        poll_interval=cfg.get("poll_interval", 20),
+        timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
     )
@@ -806,10 +808,427 @@ def cmd_rerun(args) -> int:
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=cfg.get("retry_on"),
+        poll_interval=cfg.get("poll_interval", 20),
+        timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
     )
     return _finish_run(provider, target, ref, variables, rargs)
+
+
+# --- config editor -----------------------------------------------------------
+
+# Effective defaults for the global settings the menu edits (source of truth for
+# both the interactive menu and `--show`). Keys mirror what config.dumps() emits.
+_CONFIG_DEFAULTS = {
+    "max_retries": 2, "match": "substring",
+    "poll_interval": 20, "timeout": 3600,
+    "notify": True, "notify_steps": False,
+}
+
+
+def _config_show(cfg) -> int:
+    """Non-interactive dump of effective global settings (no TTY needed)."""
+    onoff = lambda b: "on" if b else "off"
+    print("repipe global config:")
+    print(f"  retry patterns : {len(cfg.get('retry_on') or [])}")
+    print(f"  max retries    : {cfg.get('max_retries', _CONFIG_DEFAULTS['max_retries'])}")
+    print(f"  match mode     : {cfg.get('match', _CONFIG_DEFAULTS['match'])}")
+    print(f"  poll interval  : {cfg.get('poll_interval', _CONFIG_DEFAULTS['poll_interval'])}s")
+    print(f"  timeout        : {cfg.get('timeout', _CONFIG_DEFAULTS['timeout'])}s")
+    print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
+    print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
+    print(f"  your email     : {cfg.get('user_email') or '(unset)'}")
+    print(f"\nfile: {config.config_path()}")
+    return EXIT_OK
+
+
+def _ask_int(label, current, minimum):
+    """Ask for an int >= minimum; re-prompt on bad input. Blank/back keeps
+    `current`. Returns the (possibly unchanged) value."""
+    while True:
+        raw = interactive.ask(label, default=str(current))
+        if raw is interactive.BACK:
+            return current
+        raw = str(raw).strip()
+        if not raw:
+            return current
+        try:
+            v = int(raw)
+        except ValueError:
+            print(f"  enter a whole number ≥ {minimum}")
+            continue
+        if v < minimum:
+            print(f"  must be ≥ {minimum}")
+            continue
+        return v
+
+
+def _edit_patterns(cfg) -> bool:
+    """Sub-editor for the global `retry_on` list. Returns True if it changed."""
+    changed = False
+    while True:
+        patterns = list(cfg.get("retry_on") or [])
+        if patterns:
+            print(interactive.dim("current retry patterns:"))
+            for i, p in enumerate(patterns, 1):
+                print(f"  {i}) {p}")
+        else:
+            print(interactive.dim("no retry patterns configured"))
+        actions = [
+            ("suggest", "Add from suggestions"),
+            ("custom", "Add custom…"),
+            ("remove", "Remove…"),
+            ("done", "Done"),
+        ]
+        act = interactive.pick("Retry patterns", actions,
+                               to_str=lambda a: a[1], allow_back=False)[0]
+        if act == "done":
+            return changed
+        if act == "suggest":
+            avail = [p for p in SUGGESTED_RETRY_PATTERNS if p not in patterns]
+            if not avail:
+                print("  all suggestions already added.")
+                continue
+            sel = interactive.pick("Add which pattern?", avail)
+            if sel is interactive.BACK:
+                continue
+            cfg["retry_on"] = patterns + [sel]
+            changed = True
+        elif act == "custom":
+            raw = interactive.ask("New pattern")
+            raw = "" if raw is interactive.BACK else str(raw).strip()
+            if raw and raw not in patterns:
+                cfg["retry_on"] = patterns + [raw]
+                changed = True
+        elif act == "remove":
+            if not patterns:
+                print("  nothing to remove.")
+                continue
+            sel = interactive.pick("Remove which pattern?", patterns)
+            if sel is interactive.BACK:
+                continue
+            cfg["retry_on"] = [p for p in patterns if p != sel]
+            changed = True
+
+
+def _resolve_repo_key(args, cfg):
+    """Which repo to edit: detect from --path, else pick from configured repos.
+    Returns a key, or None if there's nothing to edit / the user backed out."""
+    try:
+        _, ws, repo, _ = detect_repo(getattr(args, "path", ".") or ".")
+        return f"{ws}/{repo}"
+    except RepipeError:
+        pass
+    keys = sorted((cfg.get("repos") or {}).keys())
+    if not keys:
+        print("  not in a repo and no repos configured yet — "
+              "run `repipe init` inside a repo first.")
+        return None
+    sel = interactive.pick("Which repo?", keys)
+    return None if sel is interactive.BACK else sel
+
+
+def _pick_provider(cur):
+    """Pick a provider name (known adapters + custom). Returns a name, or None
+    if the user backed out."""
+    known = sorted(PROVIDERS_BY_NAME)
+    options = [(n, n) for n in known] + [("__custom__", "custom…")]
+    default_idx = known.index(cur) if cur in known else 0
+    sel = interactive.pick("Provider", options, default_idx=default_idx,
+                           to_str=lambda x: x[1])
+    if sel is interactive.BACK:
+        return None
+    if sel[0] == "__custom__":
+        raw = interactive.ask("Provider name", default=cur or None)
+        return None if raw is interactive.BACK else str(raw).strip()
+    return sel[0]
+
+
+def _edit_repo(cfg, key) -> bool:
+    """Submenu editing a repo's flat string fields. Returns True if changed."""
+    changed = False
+    fields = [
+        ("provider", "Provider"),
+        ("qa_branch_prefix", "QA branch prefix"),
+        ("prod_branch_prefix", "Prod branch prefix"),
+    ]
+    while True:
+        r = config.get_repo(cfg, key)
+        rows = [(fk, f"{label:<18}{r.get(fk) or '(unset)'}") for fk, label in fields]
+        rows.append(("__vars__", f"Variables ({len(r.get('variables') or {})})  ›"))
+        rows.append(("done", "Done"))
+        sel = interactive.pick(f"Repo: {key}", rows,
+                               to_str=lambda x: x[1], allow_back=False)[0]
+        if sel == "done":
+            return changed
+        if sel == "__vars__":
+            changed = _edit_variables(cfg, key) or changed
+            continue
+        cur = config.get_repo(cfg, key).get(sel) or ""
+        if sel == "provider":
+            new = _pick_provider(cur)
+        else:
+            raw = interactive.ask(dict(fields)[sel], default=cur or None)
+            new = None if raw is interactive.BACK else str(raw).strip()
+        if new is not None and new != cur:
+            config.ensure_repo(cfg, key)[sel] = new
+            changed = True
+
+
+# --- per-variable schema editor (Phase 3) -----------------------------------
+#
+# Each helper mutates a single variable's `entry` dict (or the `schema` dict for
+# add/remove) in place and returns True if it changed something. String setters
+# treat blank input as "keep" and a literal "-" as "clear" (delete the key), so
+# optional fields can be unset. Toggles never write the implicit default.
+
+def _set_str_field(entry, field, label) -> bool:
+    cur = entry.get(field) or ""
+    raw = interactive.ask(f"{label} (- to clear)", default=cur or None)
+    if raw is interactive.BACK:
+        return False
+    raw = str(raw).strip()
+    if raw == "":
+        return False
+    if raw == "-":
+        if field in entry:
+            del entry[field]
+            return True
+        return False
+    if raw != cur:
+        entry[field] = raw
+        return True
+    return False
+
+
+def _toggle_field(entry, field, label, default) -> bool:
+    cur = bool(entry.get(field, default))
+    new = interactive.confirm(f"{label}?", default=cur)
+    if new != cur:
+        entry[field] = new
+        return True
+    return False
+
+
+def _edit_enum(entry) -> bool:
+    """Add/remove the variable's allowed-values list. Removing the last value
+    drops the `enum` key entirely (⇒ any input allowed)."""
+    changed = False
+    while True:
+        values = list(entry.get("enum") or [])
+        if values:
+            print(interactive.dim("enum values:"))
+            for i, v in enumerate(values, 1):
+                print(f"  {i}) {v}")
+        else:
+            print(interactive.dim("no enum values (any input allowed)"))
+        act = interactive.pick("Enum", [
+            ("add", "Add value…"), ("remove", "Remove…"), ("done", "Done"),
+        ], to_str=lambda a: a[1], allow_back=False)[0]
+        if act == "done":
+            return changed
+        if act == "add":
+            raw = interactive.ask("New value")
+            raw = "" if raw is interactive.BACK else str(raw).strip()
+            if raw and raw not in values:
+                entry["enum"] = values + [raw]
+                changed = True
+        elif act == "remove":
+            if not values:
+                print("  nothing to remove.")
+                continue
+            sel = interactive.pick("Remove which value?", values)
+            if sel is interactive.BACK:
+                continue
+            remaining = [v for v in values if v != sel]
+            if remaining:
+                entry["enum"] = remaining
+            else:
+                entry.pop("enum", None)
+            changed = True
+
+
+def _edit_default(entry) -> bool:
+    """Edit `default`. If an enum is set, offer it as a picker; else free text."""
+    values = list(entry.get("enum") or [])
+    if not values:
+        return _set_str_field(entry, "default", "default")
+    cur = entry.get("default") or ""
+    opts = ([("__clear__", "(clear)")] + [(v, v) for v in values]
+            + [("__custom__", "custom…")])
+    default_idx = 1 + values.index(cur) if cur in values else 0
+    sel = interactive.pick("Default", opts, default_idx=default_idx,
+                           to_str=lambda x: x[1])
+    if sel is interactive.BACK:
+        return False
+    if sel[0] == "__clear__":
+        return entry.pop("default", None) is not None
+    if sel[0] == "__custom__":
+        return _set_str_field(entry, "default", "default")
+    if sel[0] != cur:
+        entry["default"] = sel[0]
+        return True
+    return False
+
+
+def _edit_autofill(entry) -> bool:
+    """Autofill has one known source (git_email); offer that or (none)."""
+    cur = entry.get("autofill") or ""
+    opts = [("", "(none)"), ("git_email", "git_email")]
+    sel = interactive.pick("Autofill", opts,
+                           default_idx=1 if cur == "git_email" else 0,
+                           to_str=lambda x: x[1])
+    if sel is interactive.BACK:
+        return False
+    val = sel[0]
+    if val == cur:
+        return False
+    if val == "":
+        entry.pop("autofill", None)
+    else:
+        entry["autofill"] = val
+    return True
+
+
+def _edit_variable(schema, vname) -> bool:
+    """Per-field editor for one variable. Returns True if changed; may remove
+    the variable from `schema`."""
+    changed = False
+    while True:
+        entry = schema.get(vname, {})
+        yn = lambda b: "yes" if b else "no"
+        sv = lambda f: entry.get(f) or "(unset)"
+        rows = [
+            ("enum", f"enum             {entry.get('enum') or '(none)'}"),
+            ("default", f"default          {sv('default')}"),
+            ("required", f"required         {yn(entry.get('required', True))}"),
+            ("pattern", f"pattern          {sv('pattern')}"),
+            ("autofill", f"autofill         {sv('autofill')}"),
+            ("remember", f"remember         {yn(entry.get('remember', False))}"),
+            ("no_spaces_unless", f"no_spaces_unless {sv('no_spaces_unless')}"),
+            ("hint", f"hint             {sv('hint')}"),
+            ("__remove__", "Remove this variable"),
+            ("__done__", "Done"),
+        ]
+        sel = interactive.pick(f"Variable: {vname}", rows,
+                               to_str=lambda x: x[1], allow_back=False)[0]
+        if sel == "__done__":
+            return changed
+        if sel == "__remove__":
+            if interactive.confirm(f"Remove variable '{vname}'?", default=False):
+                schema.pop(vname, None)
+                return True
+            continue
+        entry = schema.setdefault(vname, {})
+        if sel == "enum":
+            changed = _edit_enum(entry) or changed
+        elif sel == "default":
+            changed = _edit_default(entry) or changed
+        elif sel == "autofill":
+            changed = _edit_autofill(entry) or changed
+        elif sel in ("required", "remember"):
+            changed = _toggle_field(entry, sel, sel, sel == "required") or changed
+        else:  # pattern, no_spaces_unless, hint
+            changed = _set_str_field(entry, sel, sel) or changed
+
+
+def _edit_variables(cfg, key) -> bool:
+    """List the repo's variables; pick one to edit, or add a new one."""
+    changed = False
+    while True:
+        schema = config.ensure_repo(cfg, key).setdefault("variables", {})
+        rows = [("var:" + n, f"{n}  ›") for n in sorted(schema)]
+        rows.append(("__add__", "Add variable…"))
+        rows.append(("__done__", "Done"))
+        sel = interactive.pick(f"Variables — {key}", rows,
+                               to_str=lambda x: x[1], allow_back=False)[0]
+        if sel == "__done__":
+            return changed
+        if sel == "__add__":
+            raw = interactive.ask("Variable name")
+            raw = "" if raw is interactive.BACK else str(raw).strip()
+            if not raw:
+                continue
+            if raw not in schema:
+                schema[raw] = {}
+                changed = True
+            _edit_variable(schema, raw)
+            continue
+        changed = _edit_variable(schema, sel[len("var:"):]) or changed
+
+
+def cmd_config(args) -> int:
+    cfg = config.load()
+    if getattr(args, "show", False):
+        return _config_show(cfg)
+
+    d = _CONFIG_DEFAULTS
+    dirty = False
+    while True:
+        onoff = lambda b: "on" if b else "off"
+        rows = [
+            ("patterns", f"Retry patterns ({len(cfg.get('retry_on') or [])})  ›"),
+            ("max_retries", f"Max retries       {cfg.get('max_retries', d['max_retries'])}"),
+            ("match", f"Match mode        {cfg.get('match', d['match'])}"),
+            ("poll_interval", f"Poll interval     {cfg.get('poll_interval', d['poll_interval'])}s"),
+            ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
+            ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
+            ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
+            ("user_email", f"Your email        {cfg.get('user_email') or '(unset)'}"),
+            ("repo", "Repo settings     ›"),
+            ("save", "Save & exit"),
+            ("quit", "Quit (discard)"),
+        ]
+        key = interactive.pick("repipe config", rows,
+                               to_str=lambda r: r[1], allow_back=False)[0]
+
+        if key == "save":
+            path = config.save(cfg)
+            print(f"{interactive.green('✓')} saved {path}")
+            return EXIT_OK
+        if key == "quit":
+            if dirty and not interactive.confirm("Discard changes?", default=False):
+                continue
+            return EXIT_OK
+        if key == "patterns":
+            dirty = _edit_patterns(cfg) or dirty
+        elif key == "max_retries":
+            v = _ask_int("Max retries", cfg.get("max_retries", d["max_retries"]), 0)
+            if v != cfg.get("max_retries", d["max_retries"]):
+                cfg["max_retries"] = v
+                dirty = True
+        elif key == "match":
+            cur = cfg.get("match", d["match"])
+            modes = ["substring", "regex"]
+            sel = interactive.pick("Match mode", modes,
+                                   default_idx=modes.index(cur) if cur in modes else 0)
+            if sel is not interactive.BACK and sel != cur:
+                cfg["match"] = sel
+                dirty = True
+        elif key in ("poll_interval", "timeout"):
+            v = _ask_int(key.replace("_", " ").capitalize(), cfg.get(key, d[key]), 1)
+            if v != cfg.get(key, d[key]):
+                cfg[key] = v
+                dirty = True
+        elif key in ("notify", "notify_steps"):
+            cur = cfg.get(key, d[key])
+            prompt = "Enable notifications?" if key == "notify" else "Notify on each step?"
+            new = interactive.confirm(prompt, default=cur)
+            if new != cur:
+                cfg[key] = new
+                dirty = True
+        elif key == "user_email":
+            raw = interactive.ask("Your email", default=cfg.get("user_email") or None)
+            if raw is not interactive.BACK:
+                raw = str(raw).strip()
+                if raw != (cfg.get("user_email") or ""):
+                    cfg["user_email"] = raw
+                    dirty = True
+        elif key == "repo":
+            rkey = _resolve_repo_key(args, cfg)
+            if rkey and _edit_repo(cfg, rkey):
+                dirty = True
 
 
 def _ask_token(label) -> str:
@@ -1027,6 +1446,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_rerun.add_argument("--yes", action="store_true",
                          help="disable prompts / confirm prod")
 
+    p_config = sub.add_parser("config", parents=[common],
+                              help="view / edit repipe settings (interactive)")
+    p_config.add_argument("--show", action="store_true",
+                          help="print current global settings and exit (no TTY needed)")
+
     return parser
 
 
@@ -1058,6 +1482,8 @@ def main(argv=None) -> int:
             return cmd_upgrade(args)
         if args.command == "rerun":
             return cmd_rerun(args)
+        if args.command == "config":
+            return cmd_config(args)
     except RepipeError as e:
         print(f"repipe: {e}", file=sys.stderr)
         return e.code
