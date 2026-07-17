@@ -20,6 +20,15 @@ match = "substring"
 # Default retry cap for non-prod pipelines.
 max_retries = 2
 
+# Desktop notification when a watched run finishes (and on each auto-retry).
+# Default: on in an interactive terminal, auto-suppressed in CI / piped runs.
+# Sound plays only on the final result; retries are silent banners.
+# notify = true
+
+# Also ping (silently) as each individual step/job completes mid-run. Off by
+# default — it adds one API call per poll. Same as passing --notify-steps.
+# notify_steps = false
+
 # Retry patterns — YOU choose these. repipe applies NONE by default; it only
 # re-triggers a failed run whose log matches a pattern you list here (or pass
 # with --retry-on). No pattern configured => no retries.

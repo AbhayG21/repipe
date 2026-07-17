@@ -35,6 +35,14 @@ class ConfigRoundTrip(unittest.TestCase):
         self.assertEqual(config.repo_variables(cfg, "missing/repo"), {})
 
     @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_emitter_roundtrips_notify_globals(self):
+        cfg = {"notify": False, "notify_steps": True, "max_retries": 3}
+        reparsed = tomllib.loads(config.dumps(cfg))
+        self.assertEqual(reparsed["notify"], False)
+        self.assertEqual(reparsed["notify_steps"], True)
+        self.assertEqual(reparsed["max_retries"], 3)
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
     def test_emitter_preserves_variables_remembered_last_run(self):
         cfg = sample_cfg()
         config.remember_value(cfg, "ws/repo", "Svcs", "core")

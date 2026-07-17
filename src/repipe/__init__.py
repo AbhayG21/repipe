@@ -12,7 +12,8 @@ Package map:
   http        auth + urllib helpers (only providers use these)
   providers/  Provider interface + host-keyed registry + Bitbucket adapter
   output      small formatting helpers
+  notify      best-effort local desktop notifications (zero-dep, platform dispatch)
   cli         argparse wiring + command handlers + main()
 """
 
-__version__ = "1.6.0"
+__version__ = "1.7.0"

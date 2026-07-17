@@ -77,7 +77,7 @@ def _val(v) -> str:
 
 def dumps(cfg: dict) -> str:
     lines = []
-    for k in ("user_email", "match", "max_retries"):
+    for k in ("user_email", "match", "max_retries", "notify", "notify_steps"):
         if k in cfg:
             lines.append(f"{k} = {_val(cfg[k])}")
     if "retry_on" in cfg:

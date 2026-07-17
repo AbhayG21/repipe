@@ -18,6 +18,7 @@ from .errors import (
 )
 from . import config
 from . import interactive
+from . import notify as notify_mod
 from .gitutil import detect_repo, branch_candidates, run_git
 from .http import (
     get_auth, download_bytes, download_text, credentials_path, save_credentials,
@@ -163,6 +164,12 @@ def cmd_run(args) -> int:
     _apply_autofill(schema, provided, cfg, args.path)
     variables = resolve_variables(target, provided, schema)  # fail-fast validation
 
+    # Resolve notifications: explicit --notify/--no-notify wins, else config,
+    # else default on (the TTY gate keeps "on" quiet in CI/piped runs).
+    if args.notify is None:
+        args.notify = cfg.get("notify", True)
+    args.notify_steps = args.notify_steps or bool(cfg.get("notify_steps", False))
+
     return _finish_run(provider, target, ref, variables, args)
 
 
@@ -251,11 +258,73 @@ def _print_failure(failed, logs, tail_lines=30):
         print(f"  | {ln}")
 
 
+# Don't ping for near-instant runs — you didn't have time to look away.
+NOTIFY_MIN_ELAPSED = 30
+_STEP_TERMINAL = {RunState.SUCCESS, RunState.FAILED}
+
+
+def _should_notify(args) -> bool:
+    """Notifications fire only when enabled (default on) AND stdout is a live
+    terminal — that TTY gate is what auto-suppresses CI / piped runs."""
+    return getattr(args, "notify", True) and interactive.live()
+
+
+def _notify_result(target, run, outcome, elapsed, args, note=""):
+    """Ping for a whole-run event. Final results play a sound; retries are silent.
+    Suppressed for runs shorter than NOTIFY_MIN_ELAPSED."""
+    if not _should_notify(args) or elapsed < NOTIFY_MIN_ELAPSED:
+        return
+    title = f"repipe · {target.name}"
+    n = f"#{run.number} " if run.number is not None else ""
+    table = {
+        "success": (f"✓ {n}succeeded", True),
+        "halted": (f"‖ {n}paused at a manual gate", True),
+        "failed": (f"✗ {n}failed", True),
+        "timeout": (f"⌛ {n}timed out", True),
+        "retry": (f"↻ {n}failed — retrying{note}", False),
+    }
+    msg, sound = table[outcome]
+    notify_mod.notify(title, msg, sound=sound)
+
+
+def _notify_step(target, run, step, args):
+    """Silent ping when a single step/job finishes (opt-in, --notify-steps).
+    Bypasses the elapsed gate — fast steps are exactly the progress opted into."""
+    if not _should_notify(args):
+        return
+    tail = f" #{run.number}" if run.number is not None else ""
+    sym = "✓" if step.state == RunState.SUCCESS else "✗"
+    notify_mod.notify(f"repipe · {target.name}{tail}", f"{sym} {step.name}")
+
+
+def _notify_new_steps(provider, target, run, auth, prev, args) -> dict:
+    """Diff the current steps against `prev` (a {(run_id, step_key): state} map),
+    ping any that newly reached a terminal state, and return the fresh snapshot.
+    First sighting of a step just seeds it — no ping — so attaching to an
+    already-running run doesn't replay past steps. Best-effort: a failed
+    get_steps leaves the snapshot untouched rather than breaking the watch."""
+    try:
+        steps = provider.get_steps(run, auth)
+    except RepipeError:
+        return prev
+    snapshot = dict(prev)
+    for s in steps:
+        key = (run.id, s.uuid or s.name)
+        was = snapshot.get(key)
+        snapshot[key] = s.state
+        if was is None or was in _STEP_TERMINAL:
+            continue
+        if s.state in _STEP_TERMINAL:
+            _notify_step(target, run, s, args)
+    return snapshot
+
+
 def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
     patterns = build_patterns(args.retry_on)
     terminal = {RunState.SUCCESS, RunState.FAILED, RunState.HALTED}
     deadline = time.monotonic() + args.timeout
     attempt = 0
+    step_states = {}  # (run_id, step_key) -> RunState, for --notify-steps
 
     print("\n" + interactive.dim(
         f"watching · poll {args.poll_interval}s · timeout {args.timeout}s "
@@ -272,6 +341,8 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
                 print(interactive.yellow(
                     f"⌛ timed out after {args.timeout}s "
                     f"(last {run.native_state or run.state})") + f" — {run.web_url}")
+                _notify_result(target, run, "timeout",
+                               time.monotonic() - start, args)
                 return EXIT_TIMEOUT
 
             # Wait one poll interval, animating a spinner in place on a TTY.
@@ -292,6 +363,9 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
                 time.sleep(args.poll_interval)
 
             run = provider.get_run(run.id, auth)
+            if getattr(args, "notify_steps", False) and _should_notify(args):
+                step_states = _notify_new_steps(
+                    provider, target, run, auth, step_states, args)
             if run.native_state != last:
                 interactive.clear_line()
                 print(f"  {interactive.dim('…')} {run.native_state or run.state}")
@@ -300,11 +374,13 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
         interactive.clear_line()
         if run.state == RunState.SUCCESS:
             print(interactive.green(f"✓ #{run.number} SUCCESSFUL") + f" — {run.web_url}")
+            _notify_result(target, run, "success", time.monotonic() - start, args)
             return EXIT_OK
 
         if run.state == RunState.HALTED:
             print(interactive.yellow(f"‖ #{run.number} paused at a manual gate")
                   + " (build+push done). Approve the deploy:\n  " + (run.web_url or ""))
+            _notify_result(target, run, "halted", time.monotonic() - start, args)
             return EXIT_OK
 
         # FAILED — decide whether to retry.
@@ -323,6 +399,7 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
                                       f"({len(patterns)} checked, mode={args.match})."))
             _print_failure(failed, logs)
             print(f"  {run.web_url}")
+            _notify_result(target, run, "failed", time.monotonic() - start, args)
             return EXIT_FAILED_NOMATCH
 
         if attempt >= args.max_retries:
@@ -330,11 +407,14 @@ def _watch_and_retry(provider, target, ref, variables, auth, run, args) -> int:
                   + f" — matched '{hit}' but retries exhausted ({args.max_retries}).")
             _print_failure(failed, logs)
             print(f"  {run.web_url}")
+            _notify_result(target, run, "failed", time.monotonic() - start, args)
             return EXIT_RETRIES
 
         attempt += 1
         print(interactive.yellow(f"↻ #{run.number} FAILED")
               + f" — matched '{hit}', re-triggering (retry {attempt}/{args.max_retries}) …")
+        _notify_result(target, run, "retry", time.monotonic() - start, args,
+                       note=f" ({attempt}/{args.max_retries})")
         run = provider.trigger(target, ref, variables, auth)
         _announce(target.name, ref, run)
 
@@ -346,6 +426,7 @@ def _run_args_namespace(**overrides):
         dry_run=False, yes=False, no_wait=False, force=False,
         retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
+        notify=True, notify_steps=False,
     )
     d.update(overrides)
     return argparse.Namespace(**d)
@@ -509,6 +590,8 @@ def cmd_interactive(args) -> int:
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=cfg.get("retry_on"),
+        notify=cfg.get("notify", True),
+        notify_steps=cfg.get("notify_steps", False),
     )
     code = _finish_run(provider, target, ref, variables, rargs,
                        confirmed=(target.env != "prod"))
@@ -723,6 +806,8 @@ def cmd_rerun(args) -> int:
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=cfg.get("retry_on"),
+        notify=cfg.get("notify", True),
+        notify_steps=cfg.get("notify_steps", False),
     )
     return _finish_run(provider, target, ref, variables, rargs)
 
@@ -909,6 +994,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="give up watching after N seconds (default: 3600)")
     p_run.add_argument("--force", action="store_true",
                        help="override conservative prod retry policy")
+    p_run.add_argument("--notify", dest="notify", action="store_true", default=None,
+                       help="desktop notification on finish (default: on in a terminal)")
+    p_run.add_argument("--no-notify", dest="notify", action="store_false",
+                       help="never notify (also suppresses the terminal bell)")
+    p_run.add_argument("--notify-steps", dest="notify_steps", action="store_true",
+                       help="also ping (silently) as each step/job completes")
 
     p_login = sub.add_parser("login", parents=[common],
                              help="save a CI token to ~/.config/repipe/credentials")

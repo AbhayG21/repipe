@@ -154,9 +154,21 @@ Matching is case-insensitive substring by default (`--match regex` for regex). E
 
 Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation** (type the pipeline name, or `--yes` for CI), prod runs **do not auto-retry** unless you pass `--force`, and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
 
+### Notifications
+
+While repipe is watching a run, it sends a local desktop notification when the run finishes — success, failure, halted-at-gate, or timeout — plus one on each auto-retry, so you can walk away from the terminal. It's **on by default in an interactive terminal** and auto-suppressed in CI / piped runs (nothing to pop up there). Sound plays only on the final result; retry pings are silent banners.
+
+```bash
+repipe run -p deploy-qa               # notifies on finish (default)
+repipe run -p deploy-qa --no-notify   # stay silent (also mutes the terminal bell)
+repipe run -p deploy-qa --notify-steps  # also ping as each step/job completes
+```
+
+Mechanism is zero-dependency and best-effort: macOS uses `osascript`, Linux uses `notify-send` when present, and anything else falls back to the terminal bell. A notification never affects the run's outcome or exit code. Set `notify` / `notify_steps` in config to make your choice the default.
+
 ## Configuration
 
-Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries), per-repo defaults (provider, branch prefixes), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional.
+Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries, notifications), per-repo defaults (provider, branch prefixes), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional.
 
 ## Project layout
 
