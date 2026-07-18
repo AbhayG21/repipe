@@ -78,7 +78,7 @@ def _val(v) -> str:
 def dumps(cfg: dict) -> str:
     lines = []
     for k in ("user_email", "match", "max_retries",
-              "poll_interval", "timeout", "notify", "notify_steps"):
+              "poll_interval", "timeout", "notify", "notify_steps", "notify_url"):
         if k in cfg:
             lines.append(f"{k} = {_val(cfg[k])}")
     if "retry_on" in cfg:

@@ -29,6 +29,17 @@ max_retries = 2
 # default — it adds one API call per poll. Same as passing --notify-steps.
 # notify_steps = false
 
+# Push the finish notification to your PHONE via ntfy (ntfy.sh or self-hosted).
+# Unlike the desktop notification above, this fires even with NO terminal — the
+# point is to run repipe on an always-on box, close your laptop, and still get
+# pinged. Unset => no push. Tapping the phone banner opens the run.
+#
+# SECURITY: on the public ntfy.sh server, anyone who knows the topic can read
+# your notifications. Use a long, RANDOM topic (treat it like a password), not
+# "repipe-deploys". Reserved / self-hosted topics that need auth: put the token
+# in the credentials file as REPIPE_NOTIFY_TOKEN — NEVER here.
+# notify_url = "https://ntfy.sh/repipe-7f3a9c2e-b41d-4e6a-9c1f-secret"
+
 # Watch loop tuning (read by the interactive flow and `rerun`; `run` takes these
 # as --poll-interval / --timeout flags instead). Seconds.
 # poll_interval = 20

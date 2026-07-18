@@ -4,6 +4,7 @@ import argparse
 import getpass
 import json
 import os
+import secrets
 import sys
 import time
 
@@ -17,6 +18,7 @@ from .errors import (
     EXIT_TIMEOUT,
 )
 from . import config
+from . import http
 from . import interactive
 from . import notify as notify_mod
 from .gitutil import detect_repo, branch_candidates, run_git
@@ -169,6 +171,11 @@ def cmd_run(args) -> int:
     if args.notify is None:
         args.notify = cfg.get("notify", True)
     args.notify_steps = args.notify_steps or bool(cfg.get("notify_steps", False))
+    # Phone push (independent of the TTY-gated local channel above).
+    if getattr(args, "phone_notify", None) is None:
+        args.phone_notify = True
+    if not getattr(args, "notify_url", None):
+        args.notify_url = cfg.get("notify_url")
 
     return _finish_run(provider, target, ref, variables, args)
 
@@ -264,27 +271,63 @@ _STEP_TERMINAL = {RunState.SUCCESS, RunState.FAILED}
 
 
 def _should_notify(args) -> bool:
-    """Notifications fire only when enabled (default on) AND stdout is a live
-    terminal — that TTY gate is what auto-suppresses CI / piped runs."""
+    """Local desktop notifications fire only when enabled (default on) AND stdout
+    is a live terminal — that TTY gate is what auto-suppresses CI / piped runs."""
     return getattr(args, "notify", True) and interactive.live()
 
 
+def _should_push(args) -> bool:
+    """Phone push fires whenever a notify_url is configured and it isn't disabled.
+    Deliberately NOT gated on a TTY: this is the channel for a headless box you've
+    walked away from, where the whole point is to reach your phone precisely
+    because there's no terminal watching."""
+    return bool(getattr(args, "notify_url", None)) and getattr(args, "phone_notify", True)
+
+
+def _notify_token():
+    """Optional Bearer token for reserved / self-hosted / protected ntfy topics:
+    env REPIPE_NOTIFY_TOKEN first, then the credentials file. None for the common
+    public-topic case (no auth)."""
+    v = os.environ.get("REPIPE_NOTIFY_TOKEN")
+    if v:
+        return v
+    try:
+        return http._load_credentials_file().get("REPIPE_NOTIFY_TOKEN")
+    except Exception:
+        return None
+
+
 def _notify_result(target, run, outcome, elapsed, args, note=""):
-    """Ping for a whole-run event. Final results play a sound; retries are silent.
-    Suppressed for runs shorter than NOTIFY_MIN_ELAPSED."""
-    if not _should_notify(args) or elapsed < NOTIFY_MIN_ELAPSED:
+    """Ping for a whole-run event across both channels. Final results play a sound
+    (local) / normal-or-high priority (phone); retries are silent / low-priority.
+    Suppressed for runs shorter than NOTIFY_MIN_ELAPSED. The two channels are gated
+    independently — local needs a TTY, phone needs a notify_url — so a headless VM
+    stays quiet locally while still buzzing your phone."""
+    if elapsed < NOTIFY_MIN_ELAPSED:
+        return
+    local_on, push_on = _should_notify(args), _should_push(args)
+    if not local_on and not push_on:
         return
     title = f"repipe · {target.name}"
     n = f"#{run.number} " if run.number is not None else ""
+    # outcome -> (message, local sound, ntfy priority, ntfy emoji tag)
     table = {
-        "success": (f"✓ {n}succeeded", True),
-        "halted": (f"‖ {n}paused at a manual gate", True),
-        "failed": (f"✗ {n}failed", True),
-        "timeout": (f"⌛ {n}timed out", True),
-        "retry": (f"↻ {n}failed — retrying{note}", False),
+        "success": (f"✓ {n}succeeded", True, "default", "white_check_mark"),
+        "halted": (f"‖ {n}paused at a manual gate", True, "default", "double_vertical_bar"),
+        "failed": (f"✗ {n}failed", True, "high", "x"),
+        "timeout": (f"⌛ {n}timed out", True, "default", "hourglass"),
+        "retry": (f"↻ {n}failed — retrying{note}", False, "low", "arrows_counterclockwise"),
     }
-    msg, sound = table[outcome]
-    notify_mod.notify(title, msg, sound=sound)
+    msg, sound, priority, tags = table[outcome]
+    if local_on:
+        notify_mod.notify(title, msg, sound=sound)
+    if push_on:
+        notify_mod.push(
+            args.notify_url, title, msg,
+            priority=priority, tags=tags,
+            click=getattr(run, "web_url", "") or "",
+            token=_notify_token(),
+        )
 
 
 def _notify_step(target, run, step, args):
@@ -427,6 +470,7 @@ def _run_args_namespace(**overrides):
         retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
         notify=True, notify_steps=False,
+        notify_url=None, phone_notify=True,
     )
     d.update(overrides)
     return argparse.Namespace(**d)
@@ -594,6 +638,7 @@ def cmd_interactive(args) -> int:
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
+        notify_url=cfg.get("notify_url"),
     )
     code = _finish_run(provider, target, ref, variables, rargs,
                        confirmed=(target.env != "prod"))
@@ -812,6 +857,7 @@ def cmd_rerun(args) -> int:
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
+        notify_url=cfg.get("notify_url"),
     )
     return _finish_run(provider, target, ref, variables, rargs)
 
@@ -823,7 +869,7 @@ def cmd_rerun(args) -> int:
 _CONFIG_DEFAULTS = {
     "max_retries": 2, "match": "substring",
     "poll_interval": 20, "timeout": 3600,
-    "notify": True, "notify_steps": False,
+    "notify": True, "notify_steps": False, "notify_url": "",
 }
 
 
@@ -838,6 +884,7 @@ def _config_show(cfg) -> int:
     print(f"  timeout        : {cfg.get('timeout', _CONFIG_DEFAULTS['timeout'])}s")
     print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
     print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
+    print(f"  phone push     : {cfg.get('notify_url') or '(off)'}")
     print(f"  your email     : {cfg.get('user_email') or '(unset)'}")
     print(f"\nfile: {config.config_path()}")
     return EXIT_OK
@@ -1158,6 +1205,57 @@ def _edit_variables(cfg, key) -> bool:
         changed = _edit_variable(schema, sel[len("var:"):]) or changed
 
 
+def _random_ntfy_url() -> str:
+    """A hard-to-guess public ntfy topic. On ntfy.sh anyone who knows the topic
+    can read your notifications, so the whole point is that this is random enough
+    that nobody guesses it — hence 128 bits of entropy, not a friendly name."""
+    return "https://ntfy.sh/repipe-" + secrets.token_hex(16)
+
+
+def _edit_notify_url(cfg) -> bool:
+    """Set / clear the ntfy topic URL for phone push. Offers to GENERATE a random
+    topic (the safe default — a user-picked name is easy to guess), then a test
+    send so the user can confirm their phone is subscribed before relying on it."""
+    cur = cfg.get("notify_url") or ""
+    print("Phone push sends the finish notification to an ntfy topic on your")
+    print("phone — it fires even with no terminal watching.")
+    rows = [
+        ("gen", "Generate a random ntfy.sh topic (recommended)"),
+        ("manual", "Enter a topic URL myself"),
+    ]
+    if cur:
+        rows.append(("off", "Turn phone push off"))
+    sel = interactive.pick("Phone push (ntfy)", rows, to_str=lambda x: x[1])
+    if sel is interactive.BACK:
+        return False
+    changed = False
+    if sel[0] == "gen":
+        cfg["notify_url"] = _random_ntfy_url()
+        changed = True
+        print(f"{interactive.green('✓')} generated: {cfg['notify_url']}")
+        print("  → open the ntfy app on your phone and subscribe to that topic")
+        print("    (copy the part after the last '/'). Keep this URL private.")
+    elif sel[0] == "manual":
+        raw = interactive.ask("ntfy URL", default=cur or None)
+        if raw is not interactive.BACK:
+            raw = str(raw).strip()
+            if raw and raw != cur:
+                cfg["notify_url"] = raw
+                changed = True
+    elif sel[0] == "off":
+        cfg.pop("notify_url", None)
+        changed = True
+        print(f"{interactive.green('✓')} phone push turned off")
+    url = cfg.get("notify_url")
+    if url and interactive.confirm("Send a test push now?", default=True):
+        notify_mod.push(url, "repipe · test",
+                        "phone push is wired up ✓", tags="bell",
+                        token=_notify_token())
+        print(f"{interactive.green('✓')} sent — check your phone "
+              "(nothing arriving? verify the topic + that the app is subscribed)")
+    return changed
+
+
 def cmd_config(args) -> int:
     cfg = config.load()
     if getattr(args, "show", False):
@@ -1175,6 +1273,7 @@ def cmd_config(args) -> int:
             ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
             ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
             ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
+            ("notify_url", f"Phone push (ntfy) {cfg.get('notify_url') or '(off)'}"),
             ("user_email", f"Your email        {cfg.get('user_email') or '(unset)'}"),
             ("repo", "Repo settings     ›"),
             ("save", "Save & exit"),
@@ -1218,6 +1317,8 @@ def cmd_config(args) -> int:
             if new != cur:
                 cfg[key] = new
                 dirty = True
+        elif key == "notify_url":
+            dirty = _edit_notify_url(cfg) or dirty
         elif key == "user_email":
             raw = interactive.ask("Your email", default=cfg.get("user_email") or None)
             if raw is not interactive.BACK:
@@ -1419,6 +1520,12 @@ def build_parser() -> argparse.ArgumentParser:
                        help="never notify (also suppresses the terminal bell)")
     p_run.add_argument("--notify-steps", dest="notify_steps", action="store_true",
                        help="also ping (silently) as each step/job completes")
+    p_run.add_argument("--phone-notify", dest="phone_notify", action="store_true",
+                       default=None,
+                       help="push the finish notification to your phone via ntfy "
+                            "(needs notify_url in config; fires even headless)")
+    p_run.add_argument("--no-phone-notify", dest="phone_notify",
+                       action="store_false", help="never push to your phone")
 
     p_login = sub.add_parser("login", parents=[common],
                              help="save a CI token to ~/.config/repipe/credentials")

@@ -11,7 +11,8 @@ import urllib.request
 from . import config
 from .errors import RepipeError, EXIT_CONFIG
 
-_CRED_KEYS = ("REPIPE_TOKEN", "GITHUB_TOKEN", "REPIPE_EMAIL", "REPIPE_API_TOKEN")
+_CRED_KEYS = ("REPIPE_TOKEN", "GITHUB_TOKEN", "REPIPE_EMAIL", "REPIPE_API_TOKEN",
+              "REPIPE_NOTIFY_TOKEN")
 
 
 def credentials_path() -> str:

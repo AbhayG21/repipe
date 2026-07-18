@@ -171,6 +171,24 @@ repipe run -p deploy-qa --notify-steps  # also ping as each step/job completes
 
 Mechanism is zero-dependency and best-effort: macOS uses `osascript`, Linux uses `notify-send` when present, and anything else falls back to the terminal bell. A notification never affects the run's outcome or exit code. Set `notify` / `notify_steps` in config to make your choice the default.
 
+#### Push to your phone (ntfy)
+
+The desktop notification above needs a terminal — which is exactly what you *don't* have when you run repipe on an always-on box and close your laptop. For that, point `notify_url` at an [ntfy](https://ntfy.sh) topic and the finish notification (and each retry) is pushed to your **phone**. This channel is **independent of the TTY gate**: it fires precisely because there's no terminal watching. Tapping the banner opens the run.
+
+```bash
+repipe config                          # → "Phone push (ntfy)" → generate a topic → send a test
+repipe run -p deploy-qa                # pushes on finish when notify_url is set
+repipe run -p deploy-qa --no-phone-notify   # skip the phone for this run
+```
+
+Set it up: run `repipe config → Phone push (ntfy)` and pick **Generate a random ntfy.sh topic** — repipe mints a hard-to-guess topic for you (don't hand-pick a name; a guessable one is readable by anyone). Then install the ntfy app, subscribe to that topic, and use the built-in **send a test** to confirm it reaches your phone. It lands in config as:
+
+```toml
+notify_url = "https://ntfy.sh/repipe-<random>"
+```
+
+> **Use a long, random topic.** On the public ntfy.sh server anyone who knows the topic name can read your notifications — treat it like a password. Reserved or self-hosted topics that require auth: put the token in the credentials file as `REPIPE_NOTIFY_TOKEN` (env also works), never in `config.toml`. Like the local channel, a failed push never affects the run's outcome or exit code.
+
 ## Configuration
 
 Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries, notifications), per-repo defaults (provider, branch prefixes), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional.

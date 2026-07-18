@@ -1,5 +1,6 @@
 """Local-notification module + CLI wiring (pure — no real notifications sent)."""
 
+import json
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -13,6 +14,12 @@ def _args(**over):
     base = dict(notify=True, notify_steps=False, max_retries=2)
     base.update(over)
     return SimpleNamespace(**base)
+
+
+class Resp:
+    """Minimal urlopen() return — push() only calls .close() on it."""
+    def close(self):
+        pass
 
 
 TARGET = Target(name="deploy", env="qa")
@@ -161,6 +168,127 @@ class WatchLoopStepPolling(unittest.TestCase):
         prov, code = self._run_watch(notify_steps=False)
         self.assertEqual(code, 0)
         self.assertEqual(prov.get_steps_calls, 0)
+
+
+class PushTransport(unittest.TestCase):
+    """notify.push builds ntfy's JSON publish request correctly and never raises."""
+
+    def _capture(self, *a, **kw):
+        cap = {}
+
+        def fake(req, timeout=None):
+            cap["req"] = req
+            cap["timeout"] = timeout
+            cap["body"] = json.loads(req.data.decode("utf-8")) if req.data else {}
+            return Resp()
+
+        with mock.patch.object(notify_mod.urllib.request, "urlopen", side_effect=fake):
+            notify_mod.push(*a, **kw)
+        return cap
+
+    def test_json_publish_to_server_root(self):
+        cap = self._capture(
+            "https://ntfy.sh/topic", "T", "M",
+            priority="high", tags="x", click="https://ci/1", token="tk_1",
+        )
+        req, body = cap["req"], cap["body"]
+        # JSON publishing posts to the server ROOT with the topic in the body,
+        # NOT to the topic path — that's what makes UTF-8 titles safe.
+        self.assertEqual(req.full_url, "https://ntfy.sh/")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(req.get_header("Content-type"), "application/json")
+        self.assertEqual(req.get_header("Authorization"), "Bearer tk_1")
+        self.assertEqual(cap["timeout"], 5)
+        self.assertEqual(body["topic"], "topic")
+        self.assertEqual(body["title"], "T")
+        self.assertEqual(body["message"], "M")
+        self.assertEqual(body["priority"], 4)          # "high" mapped to int
+        self.assertEqual(body["tags"], ["x"])
+        self.assertEqual(body["click"], "https://ci/1")
+
+    def test_topic_parsed_from_self_hosted_url(self):
+        body = self._capture("https://ntfy.example.com/my-topic", "T", "M")["body"]
+        self.assertEqual(body["topic"], "my-topic")
+
+    def test_optional_fields_omitted_when_empty(self):
+        cap = self._capture("https://ntfy.sh/t", "T", "M")
+        self.assertNotIn("tags", cap["body"])
+        self.assertNotIn("click", cap["body"])
+        self.assertIsNone(cap["req"].get_header("Authorization"))
+        self.assertEqual(cap["body"]["priority"], 3)   # "default" mapped to int
+
+    def test_utf8_title_survives_intact(self):
+        # the whole reason for JSON publishing: a `·` and even emoji in the title
+        # come through UTF-8-clean (the header API would mojibake them).
+        body = self._capture("https://ntfy.sh/t", "repipe · déjà 🚀", "✓ ok")["body"]
+        self.assertEqual(body["title"], "repipe · déjà 🚀")
+        self.assertEqual(body["message"], "✓ ok")
+
+    def test_no_url_is_a_noop(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen") as u:
+            notify_mod.push("", "T", "M")
+        u.assert_not_called()
+
+    def test_network_error_is_swallowed(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen",
+                               side_effect=OSError("boom")):
+            notify_mod.push("https://ntfy.sh/t", "T", "M")  # must not raise
+
+
+class PushGating(unittest.TestCase):
+    """_notify_result routes to the phone channel on a url-gate, not a TTY-gate."""
+
+    def _push(self, outcome, elapsed=100, **over):
+        with mock.patch.object(cli.interactive, "live", return_value=False), \
+                mock.patch.object(cli, "_notify_token", return_value=None), \
+                mock.patch.object(cli.notify_mod, "notify") as local, \
+                mock.patch.object(cli.notify_mod, "push") as push:
+            cli._notify_result(TARGET, RUN, outcome, elapsed,
+                               _args(notify_url="https://ntfy.sh/t", **over))
+        return local, push
+
+    def test_fires_headless_when_url_set(self):
+        # THE keystone: no TTY (VM case), but a notify_url → push still fires,
+        # while the TTY-gated local channel correctly stays silent.
+        local, push = self._push("success")
+        local.assert_not_called()
+        push.assert_called_once()
+        self.assertEqual(push.call_args.kwargs["priority"], "default")
+        self.assertEqual(push.call_args.kwargs["tags"], "white_check_mark")
+        self.assertEqual(push.call_args.kwargs["click"], RUN.web_url)
+
+    def test_failed_is_high_priority(self):
+        _, push = self._push("failed")
+        self.assertEqual(push.call_args.kwargs["priority"], "high")
+        self.assertEqual(push.call_args.kwargs["tags"], "x")
+
+    def test_retry_is_low_priority(self):
+        _, push = self._push("retry")
+        self.assertEqual(push.call_args.kwargs["priority"], "low")
+
+    def test_short_run_suppresses_push_too(self):
+        _, push = self._push("success", elapsed=5)
+        push.assert_not_called()
+
+    def test_flag_off_suppresses_push(self):
+        _, push = self._push("success", phone_notify=False)
+        push.assert_not_called()
+
+    def test_no_url_no_push(self):
+        with mock.patch.object(cli.interactive, "live", return_value=True), \
+                mock.patch.object(cli.notify_mod, "notify"), \
+                mock.patch.object(cli.notify_mod, "push") as push:
+            cli._notify_result(TARGET, RUN, "success", 100, _args())
+        push.assert_not_called()
+
+
+class NotifyUrlConfig(unittest.TestCase):
+    def test_notify_url_survives_round_trip(self):
+        import tomllib
+        from repipe import config as cfgmod
+        cfg = {"notify_url": "https://ntfy.sh/repipe-secret", "notify": True}
+        loaded = tomllib.loads(cfgmod.dumps(cfg))
+        self.assertEqual(loaded["notify_url"], "https://ntfy.sh/repipe-secret")
 
 
 if __name__ == "__main__":
