@@ -219,6 +219,7 @@
     <nav>
       <a class="navlink" href="#features">Features</a>
       <a class="navlink" href="#start">Quick start</a>
+      <a class="navlink" href="#notify">Alerts</a>
       <a class="navlink" href="#commands">Commands</a>
       <a class="navlink" href="https://github.com/AbhayG21/repipe">GitHub</a>
       <button class="toggle" id="themeBtn" aria-label="Toggle color theme">◐ theme</button>
@@ -241,6 +242,7 @@
       <span class="badge"><b>Zero</b> dependencies</span>
       <span class="badge"><b>curl</b>-installable</span>
       <span class="badge">Bitbucket <b>+</b> GitHub Actions</span>
+      <span class="badge">Desktop <b>+</b> phone alerts</span>
       <span class="badge">MIT</span>
     </div>
 
@@ -275,6 +277,8 @@
         <div class="card"><div class="sym c-cyan">≡</div><h3>Design your own inputs</h3><p>Per-repo variable schema — enum, default, required, pattern, autofill, remembered — validated locally in ~1s before any API call.</p></div>
         <div class="card"><div class="sym c-red">⚠</div><h3>Production-safe</h3><p>Prod pipelines need a typed-name confirm, never auto-retry unless forced, and a manual deploy gate reports <b>HALTED</b> with a deep link — never hangs.</p></div>
         <div class="card"><div class="sym c-cyan">▸</div><h3>Interactive TUI</h3><p>Arrow-key picker, live spinner, step counter, back-navigation — with a clean numbered fallback when there's no TTY.</p></div>
+        <div class="card"><div class="sym c-amber">🔔</div><h3>Desktop + phone alerts</h3><p>A native banner when a watched run finishes, and — new in 2.0 — a push to your phone via ntfy, so you can walk away entirely. Best-effort: never changes the outcome.</p></div>
+        <div class="card"><div class="sym c-cyan">⚙</div><h3>Config, no TOML by hand</h3><p><code>repipe config</code> is an arrow-key editor for retry patterns, alerts, timeouts and your per-repo variable schema. Or hand-edit — it round-trips cleanly.</p></div>
         <div class="card"><div class="sym c-green">✓</div><h3>Scriptable</h3><p>Flags for everything and honest exit codes, so CI can branch on success, no-match, exhausted, config, or timeout.</p></div>
       </div>
     </div>
@@ -335,6 +339,7 @@ repipe run -p deploy-qa -b main \
             <tr><td class="cmd">repipe run</td><td class="desc">Trigger + watch + auto-retry (scriptable): <code>-p -b --var --retry-on --max-retries …</code></td></tr>
             <tr><td class="cmd">repipe rerun</td><td class="desc">Repeat the last invocation for this repo.</td></tr>
             <tr><td class="cmd">repipe login</td><td class="desc">Save a CI token to <code>~/.config/repipe/credentials</code> with hidden input (<code>--verify</code> checks it first).</td></tr>
+            <tr><td class="cmd">repipe config</td><td class="desc">Arrow-key editor for global settings, alerts &amp; the per-repo variable schema (<code>--show</code> dumps it).</td></tr>
             <tr><td class="cmd">repipe init</td><td class="desc">Scaffold <code>~/.config/repipe/config.toml</code> from this repo.</td></tr>
             <tr><td class="cmd">repipe list</td><td class="desc">List runnable pipelines/workflows (offline, from the yml).</td></tr>
             <tr><td class="cmd">repipe status</td><td class="desc">State of a run by build number or id.</td></tr>
@@ -380,6 +385,33 @@ autofill = <span class="gn">"git_email"</span>   <span class="cm"># fill &amp; s
       </div>
     </div>
   </section>
+
+  <section id="notify">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="kicker">Notifications</p>
+        <h2>Walk away. It tells you when it's done.</h2>
+        <p>repipe watches the run so you don't have to. When it settles — success, failure, halted at a manual gate, or timeout — it alerts you, and pings again on each auto-retry. On by default in a terminal, auto-silenced in CI. Best-effort throughout: an alert can never change a run's outcome or exit code.</p>
+      </div>
+      <div class="two">
+        <div>
+          <h3 style="margin-top:0">On your desktop</h3>
+          <p style="color:var(--muted)">A native macOS banner the instant a watched run finishes — with a sound only on the final result, silent on retries. No dependencies, nothing to configure.</p>
+          <h3 style="margin-top:22px">On your phone <span style="font-family:var(--mono);font-size:11px;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:2px 9px;vertical-align:middle;margin-left:4px">new in 2.0</span></h3>
+          <p style="color:var(--muted)">Point <code>notify_url</code> at an <a href="https://ntfy.sh">ntfy</a> topic and the finish push lands on your phone too. It fires <em>even with no terminal</em>, so it works whether repipe runs on your laptop or a box you've walked away from — and tapping the banner opens the run.</p>
+        </div>
+        <pre><span class="cm"># generate a private topic + test it — no naming, no footgun</span>
+<span class="cy">repipe</span> config   <span class="cm"># → Phone push (ntfy) → generate → send a test</span>
+
+<span class="cm"># it lands in config as a hard-to-guess topic</span>
+notify_url = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
+
+<span class="cm"># per run</span>
+<span class="cy">repipe</span> run -p deploy-qa               <span class="cm"># pushes on finish</span>
+<span class="cy">repipe</span> run -p deploy-qa --no-phone-notify</pre>
+      </div>
+    </div>
+  </section>
 </main>
 
 <footer>
@@ -387,7 +419,7 @@ autofill = <span class="gn">"git_email"</span>   <span class="cm"># fill &amp; s
     <span class="brand"><span class="prompt">$ </span>repipe</span>
     <span>·  MIT licensed</span>
     <a href="https://github.com/AbhayG21/repipe">github.com/AbhayG21/repipe</a>
-    <span class="sp">v1.6.0</span>
+    <span class="sp">v2.0.0</span>
   </div>
 </footer>
 
@@ -422,7 +454,8 @@ autofill = <span class="gn">"git_email"</span>   <span class="cm"># fill &amp; s
     {t: '➜ triggered deploy-qa on qa-release-2024-05-29', c: 'c-cyan'},
     {t: '  build:  #159', c: 'c-mut'},
     {t: '  … IN_PROGRESS', c: 'c-mut'},
-    {t: '✓ #159 SUCCESSFUL — bitbucket.org/…/results/159', c: 'c-green'}
+    {t: '✓ #159 SUCCESSFUL — bitbucket.org/…/results/159', c: 'c-green'},
+    {t: '  ↳ pushed to your phone (ntfy) 🔔', c: 'c-mut'}
   ];
   var body = document.getElementById('termBody');
   var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
