@@ -297,6 +297,19 @@ def _notify_token():
         return None
 
 
+def _login_email():
+    """The email repipe authenticates with (Bitbucket Basic auth): env
+    REPIPE_EMAIL first, then the credentials file. Distinct from config's
+    `user_email` (autofill/display) — this is the credential half of the pair."""
+    v = os.environ.get("REPIPE_EMAIL")
+    if v:
+        return v
+    try:
+        return http._load_credentials_file().get("REPIPE_EMAIL")
+    except Exception:
+        return None
+
+
 def _notify_result(target, run, outcome, elapsed, args, note=""):
     """Ping for a whole-run event across both channels. Final results play a sound
     (local) / normal-or-high priority (phone); retries are silent / low-priority.
@@ -885,7 +898,7 @@ def _config_show(cfg) -> int:
     print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
     print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
     print(f"  phone push     : {cfg.get('notify_url') or '(off)'}")
-    print(f"  your email     : {cfg.get('user_email') or '(unset)'}")
+    print(f"  autofill email : {cfg.get('user_email') or '(unset)'}")
     print(f"\nfile: {config.config_path()}")
     return EXIT_OK
 
@@ -1274,7 +1287,7 @@ def cmd_config(args) -> int:
             ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
             ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
             ("notify_url", f"Phone push (ntfy) {cfg.get('notify_url') or '(off)'}"),
-            ("user_email", f"Your email        {cfg.get('user_email') or '(unset)'}"),
+            ("user_email", f"Email (autofill)  {cfg.get('user_email') or '(unset)'}"),
             ("repo", "Repo settings     ›"),
             ("save", "Save & exit"),
             ("quit", "Quit (discard)"),
@@ -1320,12 +1333,23 @@ def cmd_config(args) -> int:
         elif key == "notify_url":
             dirty = _edit_notify_url(cfg) or dirty
         elif key == "user_email":
-            raw = interactive.ask("Your email", default=cfg.get("user_email") or None)
+            print(interactive.dim(
+                "  Used to autofill pipeline variables (autofill = \"git_email\") "
+                "and shown here."))
+            print(interactive.dim(
+                "  This is NOT your login email — to change that, run `repipe login`."))
+            raw = interactive.ask("Autofill email",
+                                  default=cfg.get("user_email") or None)
             if raw is not interactive.BACK:
                 raw = str(raw).strip()
                 if raw != (cfg.get("user_email") or ""):
                     cfg["user_email"] = raw
                     dirty = True
+                    login_email = _login_email()
+                    if raw and login_email and raw != login_email:
+                        print(interactive.dim(
+                            f"  note: your Bitbucket login email ({login_email}) is "
+                            "unchanged — run `repipe login` to change that."))
         elif key == "repo":
             rkey = _resolve_repo_key(args, cfg)
             if rkey and _edit_repo(cfg, rkey):
@@ -1339,16 +1363,54 @@ def _ask_token(label) -> str:
     return token
 
 
-def _prompt_credential(name):
+def _persist_login_email(mapping):
+    """Bridge login → config: the Bitbucket API-token method collects an email
+    (saved as the credential REPIPE_EMAIL). Mirror it into config's `user_email`
+    — a different key, in a different file — so it shows up in `repipe config`
+    and feeds `git_email` autofill. Only fills a blank one, never clobbers a
+    user-set value. Returns the email if it wrote one, else None."""
+    email = (mapping or {}).get("REPIPE_EMAIL")
+    if not email:
+        return None
+    cfg = config.load()
+    if cfg.get("user_email"):
+        return None
+    cfg["user_email"] = email
+    config.save(cfg)
+    return email
+
+
+def _access_token_url(workspace, repo) -> str:
+    """The Bitbucket repository Access-tokens settings page. Deep-links straight
+    to this repo's page when we know it; otherwise the generic settings path."""
+    if workspace and repo:
+        return f"https://bitbucket.org/{workspace}/{repo}/admin/access-tokens"
+    return ("https://bitbucket.org → Repository (or Workspace) settings → "
+            "Access tokens")
+
+
+def _print_token_url(url, scopes=None):
+    """Show where to generate the token — the URL on its own line so terminals
+    render it as a clickable link, with any scope hint on a separate dim line."""
+    if not url:
+        return
+    print(interactive.dim("  generate the token at:"))
+    print("    " + url)
+    if scopes:
+        print(interactive.dim("    scopes/permissions needed: " + scopes))
+
+
+def _prompt_credential(name, workspace=None, repo=None):
     """Interactively collect a credential, tailored to the detected host.
     Returns (mapping, auth). `name` is the provider name or None (unknown)."""
     if name == "github":
         # GitHub authenticates with a single Bearer token — no email variant.
         print("  GitHub needs a personal access token with the "
               + interactive.bold("actions:write") + " scope (to trigger workflows).")
-        print(interactive.dim("  create one → https://github.com/settings/tokens"))
-        print(interactive.dim("    fine-grained: Actions = Read and write   ·   "
-                              "classic: repo + workflow"))
+        _print_token_url(
+            "https://github.com/settings/personal-access-tokens/new",
+            "fine-grained: Actions = Read and write   ·   "
+            "classic (github.com/settings/tokens): repo + workflow")
         token = _ask_token("paste the token")
         return {"REPIPE_TOKEN": token}, ("bearer", token)
 
@@ -1357,18 +1419,24 @@ def _prompt_credential(name):
         methods = [
             {"id": "api", "label": "Atlassian API token",
              "desc": "works without admin · email + token",
-             "url": "https://id.atlassian.com/manage-profile/security/api-tokens"
-                    "  (scopes: read/write:pipeline:bitbucket)"},
+             "url": "https://id.atlassian.com/manage-profile/security/api-tokens",
+             "scopes": "read/write:pipeline:bitbucket, read:repository:bitbucket"},
             {"id": "access", "label": "Access token",
              "desc": "repo/workspace token · needs admin",
-             "url": "Repo/Workspace settings → Access tokens (Pipelines: read + write)"},
+             "url": _access_token_url(workspace, repo),
+             "scopes": "Pipelines: read + write"},
         ]
     else:
         methods = [
             {"id": "access", "label": "A single token",
-             "desc": "GitHub PAT or Bitbucket access token", "url": None},
+             "desc": "GitHub PAT or Bitbucket access token",
+             "url": "GitHub → https://github.com/settings/personal-access-tokens/new"
+                    "   ·   Bitbucket → repo/workspace settings → Access tokens",
+             "scopes": "GitHub: actions:write · Bitbucket: Pipelines read + write"},
             {"id": "api", "label": "Bitbucket API token",
-             "desc": "Atlassian email + API token", "url": None},
+             "desc": "Atlassian email + API token",
+             "url": "https://id.atlassian.com/manage-profile/security/api-tokens",
+             "scopes": "read/write:pipeline:bitbucket, read:repository:bitbucket"},
         ]
 
     choice = interactive.pick(
@@ -1377,8 +1445,7 @@ def _prompt_credential(name):
         to_str=lambda m: f"{m['label']}  {interactive.dim('— ' + m['desc'])}",
         allow_back=False,
     )
-    if choice.get("url"):
-        print(interactive.dim("  get it at: " + choice["url"]))
+    _print_token_url(choice.get("url"), choice.get("scopes"))
 
     if choice["id"] == "api":
         email = interactive.ask("Atlassian account email", allow_back=False)
@@ -1394,6 +1461,7 @@ def cmd_login(args) -> int:
     """Prompt for a token (hidden) and save it to the credentials file, 0o600.
     With --verify, check it against the current repo's host before saving."""
     provider = None
+    workspace = repo = None
     try:
         host, workspace, repo, _ = detect_repo(args.path)
         provider = choose_provider(host, args.provider)(workspace, repo)
@@ -1411,7 +1479,7 @@ def cmd_login(args) -> int:
     if name:
         print(interactive.dim(f"  detected {name} · {workspace}/{repo}"))
     print()
-    mapping, auth = _prompt_credential(name)
+    mapping, auth = _prompt_credential(name, workspace, repo)
 
     if args.verify:
         if not provider:
@@ -1445,6 +1513,10 @@ def cmd_login(args) -> int:
     saved = save_credentials(mapping)
     print(f"  wrote {saved} (chmod 600)")
     print(interactive.dim("  the environment still overrides this file when set."))
+    mirrored = _persist_login_email(mapping)
+    if mirrored:
+        print(interactive.dim(
+            f"  also set user_email = {mirrored} in {config.config_path()}"))
     return EXIT_OK
 
 

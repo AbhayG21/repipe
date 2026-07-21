@@ -303,8 +303,11 @@
           <div class="n">2</div>
           <div>
             <h3>Authenticate</h3>
-            <p>A token for your CI host, set as an env var — never written to a file.</p>
-            <pre><span class="cm"># GitHub: a token with actions:write (or GITHUB_TOKEN in CI)</span>
+            <p><code>repipe login</code> walks you through it — it links straight to the token page for your host (with the scopes you need) and saves the credential locked-down. Or set an env var.</p>
+            <pre><span class="cm"># guided: shows the token link + scopes, saves 0600</span>
+repipe login
+
+<span class="cm"># or set it yourself — GitHub token with actions:write (or GITHUB_TOKEN in CI)</span>
 <span class="cy">export</span> REPIPE_TOKEN=<span class="gn">"&lt;your-token&gt;"</span></pre>
           </div>
         </div>
@@ -419,7 +422,7 @@ notify_url = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
     <span class="brand"><span class="prompt">$ </span>repipe</span>
     <span>·  MIT licensed</span>
     <a href="https://github.com/AbhayG21/repipe">github.com/AbhayG21/repipe</a>
-    <span class="sp">v2.0.0</span>
+    <span class="sp">v2.0.1</span>
   </div>
 </footer>
 

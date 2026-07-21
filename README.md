@@ -92,7 +92,9 @@ EOF
 
 `chmod 600` it (repipe warns if it's readable by others). It's already covered by `.gitignore`.
 
-Or let repipe write it for you — `repipe login` prompts for the token with hidden input and saves the file `0o600`. Add `--verify` (inside a repo) to confirm the token works with one read-only API call before saving.
+Or let repipe write it for you — `repipe login` prompts for the token with hidden input and saves the file `0o600`. It **shows you exactly where to generate the token** for your host (a repo-specific Bitbucket access-token link, the Atlassian API-token page, or the GitHub PAT page, with the scopes you need), and when you use the Atlassian email+token method it also records your email as `user_email` in `config.toml` so `repipe config` and `git_email` autofill pick it up. Add `--verify` (inside a repo) to confirm the token works with one read-only API call before saving.
+
+> Two emails, two jobs: `REPIPE_EMAIL` in the credentials file is your **login** credential (paired with the API token); `user_email` in `config.toml` is the **autofill/display** email. To change the login email, re-run `repipe login`; to change the autofill one, use `repipe config`.
 
 ### Verify your credential
 

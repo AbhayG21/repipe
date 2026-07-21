@@ -138,5 +138,67 @@ class RaiseHttp(unittest.TestCase):
         self.assertIn("pipeline:bitbucket", str(cm.exception))
 
 
+class LoginEmailBridge(unittest.TestCase):
+    """`repipe login` (API-token method) must mirror the collected email into
+    config's user_email, so `repipe config` doesn't show it as unset."""
+
+    def test_mirrors_email_when_config_blank(self):
+        from repipe import cli
+        with mock.patch.object(cli.config, "load", return_value={}), \
+                mock.patch.object(cli.config, "save") as save:
+            got = cli._persist_login_email(
+                {"REPIPE_EMAIL": "e@x.com", "REPIPE_API_TOKEN": "a"})
+        self.assertEqual(got, "e@x.com")
+        self.assertEqual(save.call_args.args[0]["user_email"], "e@x.com")
+
+    def test_does_not_clobber_existing_user_email(self):
+        from repipe import cli
+        with mock.patch.object(cli.config, "load",
+                               return_value={"user_email": "mine@x.com"}), \
+                mock.patch.object(cli.config, "save") as save:
+            got = cli._persist_login_email({"REPIPE_EMAIL": "e@x.com"})
+        self.assertIsNone(got)
+        save.assert_not_called()
+
+    def test_noop_for_emailless_mapping(self):
+        from repipe import cli
+        with mock.patch.object(cli.config, "save") as save:
+            got = cli._persist_login_email({"REPIPE_TOKEN": "t"})
+        self.assertIsNone(got)
+        save.assert_not_called()
+
+
+class LoginEmailLookup(unittest.TestCase):
+    """_login_email resolves the auth email: env wins over the credentials file."""
+
+    def test_env_wins(self):
+        from repipe import cli
+        with mock.patch.dict(os.environ, {"REPIPE_EMAIL": "env@x.com"}), \
+                mock.patch.object(cli.http, "_load_credentials_file",
+                                  return_value={"REPIPE_EMAIL": "file@x.com"}):
+            self.assertEqual(cli._login_email(), "env@x.com")
+
+    def test_falls_back_to_credentials_file(self):
+        from repipe import cli
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(cli.http, "_load_credentials_file",
+                                  return_value={"REPIPE_EMAIL": "file@x.com"}):
+            self.assertEqual(cli._login_email(), "file@x.com")
+
+
+class AccessTokenUrl(unittest.TestCase):
+    def test_deep_links_to_repo_when_known(self):
+        from repipe import cli
+        self.assertEqual(
+            cli._access_token_url("me-cleartrip", "supply-core-new"),
+            "https://bitbucket.org/me-cleartrip/supply-core-new/admin/access-tokens")
+
+    def test_generic_path_when_repo_unknown(self):
+        from repipe import cli
+        url = cli._access_token_url(None, None)
+        self.assertIn("bitbucket.org", url)
+        self.assertIn("Access tokens", url)
+
+
 if __name__ == "__main__":
     unittest.main()
