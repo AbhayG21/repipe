@@ -38,10 +38,18 @@ jobs:
       - name: Smoke-test the built binary
         run: ./repipe version
 
-      - name: Publish the release
+      - name: Publish the release (skip if it already exists)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" repipe \
-            --title "repipe $GITHUB_REF_NAME" \
-            --generate-notes
+          # Releases are usually cut manually first (with hand-written notes),
+          # which also creates the tag that triggered this run. In that case the
+          # release already exists — leave it untouched. Only auto-publish (with
+          # generated notes) as a fallback when no release was created manually.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — leaving it as-is (manual notes win)."
+          else
+            gh release create "$GITHUB_REF_NAME" repipe \
+              --title "repipe $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
