@@ -19,6 +19,10 @@ without updating both is incomplete. Before pushing/tagging any release:
 8. Cut the GitHub Release + tag `vX.Y.Z`, attach the `repipe` asset, mark it Latest.
    (`install.sh` / `repipe upgrade` pull from **Releases**, not `/main` — so
    pushing to main alone does not distribute anything.)
+9. **Update the Homebrew tap** (`AbhayG21/homebrew-tap`, `Formula/repipe.rb`):
+   bump the `url` to the new `vX.Y.Z` and the `sha256` (`shasum -a 256 repipe`),
+   commit + push. That's how `brew upgrade repipe` gets the new version — the tap
+   does not auto-follow releases.
 
 ## Locked conventions
 
