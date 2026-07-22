@@ -24,7 +24,10 @@ jobs:
     # The committed `repipe` zipapp must match a fresh reproducible build of src/,
     # so a stale artifact can never ship. build.sh pins mtimes + TZ for byte-stable
     # output; guard both that it reproduces and that the committed copy is current.
-    runs-on: ubuntu-latest
+    # Runs on macOS — the artifact is built + committed on macOS (the supported
+    # platform), and zipapp bytes can differ across OSes, so comparing on the same
+    # platform is what keeps this a signal instead of a cross-platform false red.
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -107,6 +107,8 @@ repipe status <a-recent-build-number>
 
 If it prints a real state, you're set. Common HTTP codes if you debug with `curl`: `200` = good; `401` = token rejected (wrong type/value — e.g. an API token used as Bearer); `403` = authenticated but missing a scope; `404` on the repo root usually means no `read:repository` scope (harmless — repipe only calls `/pipelines/…`).
 
+Or run **`repipe doctor`** for an all-in-one check — it confirms your credentials resolve and pass a read-only auth probe, that your config parses, whether auto-retry patterns are set, and (when `notify_url` is configured) fires a test push to your phone. Exit code `0` = healthy, `3` = something's wrong.
+
 Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitignore` covers any `credentials` file.
 
 ## Usage
@@ -114,6 +116,7 @@ Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitign
 ```bash
 repipe                                  # interactive: pick pipeline/env/branch/vars, trigger, watch, retry
 repipe login [--verify]                 # save a CI token to the credentials file (hidden input)
+repipe doctor                           # check your setup: creds, auth, config, alerts (+ test push)
 repipe config [--show]                  # view/edit settings via a menu (--show just prints them)
 repipe init                             # scaffold ~/.config/repipe/config.toml from this repo
 repipe suggestions                      # print suggested retry patterns to copy into config

@@ -1520,6 +1520,105 @@ def cmd_login(args) -> int:
     return EXIT_OK
 
 
+def cmd_doctor(args) -> int:
+    """Diagnose the local setup — repo detection, credentials, auth, config,
+    retry patterns, and notifications. Read-only, except it fires one test phone
+    push when notify_url is set and we're in a terminal. Exits 3 (config/auth)
+    if any hard check fails (✗), else 0; warnings (⚠) don't affect the code."""
+    ok, warn, bad = interactive.green("✓"), interactive.yellow("⚠"), interactive.red("✗")
+    info = interactive.dim("·")
+    failed = False
+
+    print(interactive.bold("repipe doctor") + interactive.dim(f"  (v{__version__})"))
+    print()
+
+    # 1. Repo detection
+    provider = None
+    try:
+        host, workspace, repo, _ = detect_repo(args.path)
+        provider = choose_provider(host, args.provider)(workspace, repo)
+        print(f"  {ok} repo           {provider.NAME} · {workspace}/{repo}")
+    except RepipeError as e:
+        print(f"  {warn} repo           not a recognized CI repo here")
+        print(interactive.dim(f"      {e}"))
+        print(interactive.dim("      auth + trigger checks need to run inside a repo"))
+
+    # 2. Credentials (env or credentials file)
+    auth = None
+    try:
+        auth = get_auth(required=False)
+    except RepipeError:
+        auth = None
+    if auth:
+        detail = auth[0] + (f" · {auth[1]}" if auth[0] == "basic" else "")
+        print(f"  {ok} credentials    {detail}")
+    else:
+        print(f"  {bad} credentials    none found — run `repipe login`")
+        failed = True
+
+    # 3. Auth validity — a cheap read-only probe (needs a repo + credentials)
+    if provider and auth:
+        code = provider.verify_auth(auth)
+        if code == 200:
+            print(f"  {ok} auth           verified ({provider.NAME}, 200)")
+        elif code == 401:
+            print(f"  {bad} auth           rejected (401) — token invalid or wrong host")
+            failed = True
+        elif code == 403:
+            print(f"  {warn} auth           authenticated but missing a scope (403)")
+        elif code == 0:
+            print(f"  {warn} auth           couldn't reach {provider.NAME} to verify")
+        elif code is None:
+            print(f"  {info} auth           {provider.NAME} can't verify (skipped)")
+        else:
+            print(f"  {warn} auth           unexpected status {code}")
+    elif auth:
+        print(f"  {info} auth           skipped (not in a repo)")
+
+    # 4. Config file — load() swallows parse errors, so re-parse to surface them
+    cfg = config.load()
+    cfg_path = config.config_path()
+    if not os.path.isfile(cfg_path):
+        print(f"  {info} config         none yet (optional; `repipe init` scaffolds one)")
+    elif config.tomllib is None:
+        print(f"  {info} config         present (can't parse-check on this Python)")
+    else:
+        try:
+            with open(cfg_path, "rb") as f:
+                config.tomllib.load(f)
+            print(f"  {ok} config         {cfg_path}")
+        except Exception as e:
+            print(f"  {bad} config         parse error — {e}")
+            failed = True
+
+    # 5. Retry patterns
+    patterns = cfg.get("retry_on") or []
+    if patterns:
+        print(f"  {ok} retry patterns {len(patterns)} configured")
+    else:
+        print(f"  {warn} retry patterns none — auto-retry is off (`repipe suggestions`)")
+
+    # 6. Notifications
+    print(f"  {ok if cfg.get('notify', True) else info} desktop alerts "
+          f"{'on' if cfg.get('notify', True) else 'off'}")
+    url = cfg.get("notify_url")
+    if not url:
+        print(f"  {info} phone push     off (`repipe config` → Phone push)")
+    elif interactive.live():
+        notify_mod.push(url, "repipe · doctor", "doctor test push ✓",
+                        tags="stethoscope", token=_notify_token())
+        print(f"  {ok} phone push     configured — test sent, check your phone")
+    else:
+        print(f"  {ok} phone push     configured (run in a terminal to send a test)")
+
+    print()
+    if failed:
+        print(interactive.red("  problems found above (✗) — fix those first."))
+        return EXIT_CONFIG
+    print(interactive.green("  all good."))
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repipe",
@@ -1607,6 +1706,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--force", action="store_true",
                          help="overwrite an existing file / save despite a failed verify")
 
+    sub.add_parser("doctor", parents=[common],
+                   help="diagnose your setup (credentials, auth, config, alerts)")
     sub.add_parser("init", parents=[common],
                    help="scaffold ~/.config/repipe/config.toml from this repo")
     sub.add_parser("suggestions",
@@ -1653,6 +1754,8 @@ def main(argv=None) -> int:
             return cmd_run(args)
         if args.command == "login":
             return cmd_login(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
         if args.command == "init":
             return cmd_init(args)
         if args.command == "suggestions":

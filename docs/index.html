@@ -342,6 +342,7 @@ repipe run -p deploy-qa -b main \
             <tr><td class="cmd">repipe run</td><td class="desc">Trigger + watch + auto-retry (scriptable): <code>-p -b --var --retry-on --max-retries …</code></td></tr>
             <tr><td class="cmd">repipe rerun</td><td class="desc">Repeat the last invocation for this repo.</td></tr>
             <tr><td class="cmd">repipe login</td><td class="desc">Save a CI token to <code>~/.config/repipe/credentials</code> with hidden input (<code>--verify</code> checks it first).</td></tr>
+            <tr><td class="cmd">repipe doctor</td><td class="desc">Check your setup end to end — credentials, auth probe, config, retry patterns, and a test phone push.</td></tr>
             <tr><td class="cmd">repipe config</td><td class="desc">Arrow-key editor for global settings, alerts &amp; the per-repo variable schema (<code>--show</code> dumps it).</td></tr>
             <tr><td class="cmd">repipe init</td><td class="desc">Scaffold <code>~/.config/repipe/config.toml</code> from this repo.</td></tr>
             <tr><td class="cmd">repipe list</td><td class="desc">List runnable pipelines/workflows (offline, from the yml).</td></tr>
@@ -422,7 +423,7 @@ notify_url = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
     <span class="brand"><span class="prompt">$ </span>repipe</span>
     <span>·  MIT licensed</span>
     <a href="https://github.com/AbhayG21/repipe">github.com/AbhayG21/repipe</a>
-    <span class="sp">v2.0.1</span>
+    <span class="sp">v2.1.0</span>
   </div>
 </footer>
 
