@@ -40,6 +40,12 @@ max_retries = 2
 # in the credentials file as REPIPE_NOTIFY_TOKEN — NEVER here.
 # notify_url = "https://ntfy.sh/repipe-7f3a9c2e-b41d-4e6a-9c1f-secret"
 
+# Or push to Google Chat — personal push via a private "space of one" incoming
+# webhook (create a space, invite nobody, Apps & integrations → Manage webhooks).
+# Configure both keys and BOTH fire. The webhook URL IS the credential (its
+# key+token query params) — keep it private. Unset => no Google Chat push.
+# notify_gchat_url = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=...&token=..."
+
 # Watch loop tuning (read by the interactive flow and `rerun`; `run` takes these
 # as --poll-interval / --timeout flags instead). Seconds.
 # poll_interval = 20

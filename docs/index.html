@@ -271,13 +271,13 @@
       </div>
       <div class="grid">
         <div class="card"><div class="sym c-cyan">{ }</div><h3>Zero dependencies</h3><p>One Python 3 standard-library script. No pip, no jq, no runtime to manage. Shipped as a single zipapp.</p></div>
-        <div class="card"><div class="sym c-green">⇩</div><h3>curl-installable</h3><p>One line drops it on your PATH. <code>repipe upgrade</code> swaps itself for the latest build, atomically.</p></div>
+        <div class="card"><div class="sym c-green">⇩</div><h3>curl-installable</h3><p>One line drops it on your PATH. <code>repipe upgrade</code> swaps itself for the latest build, atomically — and the welcome screen quietly flags when a new release is out (checked once a day).</p></div>
         <div class="card"><div class="sym c-cyan">⇄</div><h3>Provider-agnostic</h3><p>Bitbucket Cloud and GitHub Actions ship today. The core never touches the network — new adapters are drop-in.</p></div>
         <div class="card"><div class="sym c-amber">↻</div><h3>Opt-in auto-retry</h3><p>repipe retries <em>nothing</em> by default. You list the transient-error patterns worth re-triggering; no match, no retry.</p></div>
         <div class="card"><div class="sym c-cyan">≡</div><h3>Design your own inputs</h3><p>Per-repo variable schema — enum, default, required, pattern, autofill, remembered — validated locally in ~1s before any API call.</p></div>
         <div class="card"><div class="sym c-red">⚠</div><h3>Production-safe</h3><p>Prod pipelines need a typed-name confirm, never auto-retry unless forced, and a manual deploy gate reports <b>HALTED</b> with a deep link — never hangs.</p></div>
         <div class="card"><div class="sym c-cyan">▸</div><h3>Interactive TUI</h3><p>Arrow-key picker, live spinner, step counter, back-navigation — with a clean numbered fallback when there's no TTY.</p></div>
-        <div class="card"><div class="sym c-amber">🔔</div><h3>Desktop + phone alerts</h3><p>A native banner when a watched run finishes, and — new in 2.0 — a push to your phone via ntfy, so you can walk away entirely. Best-effort: never changes the outcome.</p></div>
+        <div class="card"><div class="sym c-amber">🔔</div><h3>Desktop + phone alerts</h3><p>A native banner when a watched run finishes, and — new in 2.0 — a push to your phone via ntfy or Google Chat, so you can walk away entirely. Best-effort: never changes the outcome.</p></div>
         <div class="card"><div class="sym c-cyan">⚙</div><h3>Config, no TOML by hand</h3><p><code>repipe config</code> is an arrow-key editor for retry patterns, alerts, timeouts and your per-repo variable schema. Or hand-edit — it round-trips cleanly.</p></div>
         <div class="card"><div class="sym c-green">✓</div><h3>Scriptable</h3><p>Flags for everything and honest exit codes, so CI can branch on success, no-match, exhausted, config, or timeout.</p></div>
       </div>
@@ -401,14 +401,15 @@ autofill = <span class="gn">"git_email"</span>   <span class="cm"># fill &amp; s
         <div>
           <h3 style="margin-top:0">On your desktop</h3>
           <p style="color:var(--muted)">A native macOS banner the instant a watched run finishes — with a sound only on the final result, silent on retries. No dependencies, nothing to configure.</p>
-          <h3 style="margin-top:22px">On your phone <span style="font-family:var(--mono);font-size:11px;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:2px 9px;vertical-align:middle;margin-left:4px">new in 2.0</span></h3>
-          <p style="color:var(--muted)">Point <code>notify_url</code> at an <a href="https://ntfy.sh">ntfy</a> topic and the finish push lands on your phone too. It fires <em>even with no terminal</em>, so it works whether repipe runs on your laptop or a box you've walked away from — and tapping the banner opens the run.</p>
+          <h3 style="margin-top:22px">On your phone <span style="font-family:var(--mono);font-size:11px;color:var(--amber);border:1px solid var(--amber);border-radius:999px;padding:2px 9px;vertical-align:middle;margin-left:4px">new in 2.2</span></h3>
+          <p style="color:var(--muted)">Pick a phone-push provider — <a href="https://ntfy.sh">ntfy</a> for zero-setup personal push, or <strong>Google Chat</strong> (a private "space of one" webhook) for a personal feed inside your org. Configure both and each one fires. It fires <em>even with no terminal</em>, so it works whether repipe runs on your laptop or a box you've walked away from — and tapping the banner opens the run.</p>
         </div>
-        <pre><span class="cm"># generate a private topic + test it — no naming, no footgun</span>
-<span class="cy">repipe</span> config   <span class="cm"># → Phone push (ntfy) → generate → send a test</span>
+        <pre><span class="cm"># pick a destination + test it — no naming, no footgun</span>
+<span class="cy">repipe</span> config   <span class="cm"># → Phone push › → ntfy / Google Chat → send a test</span>
 
-<span class="cm"># it lands in config as a hard-to-guess topic</span>
-notify_url = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
+<span class="cm"># each provider lands in config under its own key</span>
+notify_url       = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
+notify_gchat_url = <span class="gn">"https://chat.googleapis.com/v1/spaces/…"</span>
 
 <span class="cm"># per run</span>
 <span class="cy">repipe</span> run -p deploy-qa               <span class="cm"># pushes on finish</span>
@@ -423,7 +424,7 @@ notify_url = <span class="gn">"https://ntfy.sh/repipe-&lt;random&gt;"</span>
     <span class="brand"><span class="prompt">$ </span>repipe</span>
     <span>·  MIT licensed</span>
     <a href="https://github.com/AbhayG21/repipe">github.com/AbhayG21/repipe</a>
-    <span class="sp">v2.1.0</span>
+    <span class="sp">v2.2.0</span>
   </div>
 </footer>
 

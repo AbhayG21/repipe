@@ -55,13 +55,16 @@ def env_badge(env: str) -> str:
     return green("[qa]") if env == "qa" else red(f"[{env}]")
 
 
-def banner(repo_key, provider_name, version):
+def banner(repo_key, provider_name, version, update_note=None):
     """Compact welcome header. Shown whenever interactive (stdout is a TTY);
-    colors within it still respect NO_COLOR."""
+    colors within it still respect NO_COLOR. `update_note`, when set, is a short
+    'a newer version is available' line shown under the version."""
     if not sys.stdout.isatty():
         return
     print(bold(cyan("repipe")) + dim(f"  v{version}"))
     print(dim(f"{repo_key} · {provider_name}"))
+    if update_note:
+        print(yellow(update_note))
     print(dim("↑/↓ move · ← back · Enter select · ^C quit"))
     print(dim("─" * 46))
 

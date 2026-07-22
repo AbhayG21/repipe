@@ -174,8 +174,7 @@ def cmd_run(args) -> int:
     # Phone push (independent of the TTY-gated local channel above).
     if getattr(args, "phone_notify", None) is None:
         args.phone_notify = True
-    if not getattr(args, "notify_url", None):
-        args.notify_url = cfg.get("notify_url")
+    args.push_cfg = _push_cfg_from(cfg)
 
     return _finish_run(provider, target, ref, variables, args)
 
@@ -276,12 +275,29 @@ def _should_notify(args) -> bool:
     return getattr(args, "notify", True) and interactive.live()
 
 
-def _should_push(args) -> bool:
-    """Phone push fires whenever a notify_url is configured and it isn't disabled.
-    Deliberately NOT gated on a TTY: this is the channel for a headless box you've
-    walked away from, where the whole point is to reach your phone precisely
-    because there's no terminal watching."""
-    return bool(getattr(args, "notify_url", None)) and getattr(args, "phone_notify", True)
+def _push_cfg_from(cfg) -> dict:
+    """Snapshot every push provider's configured URL from `cfg` into a
+    {config_key: url} dict for the dispatch loop to consume. Driven by the
+    registry so a new provider needs no change here."""
+    return {p["config_key"]: (cfg.get(p["config_key"]) or "")
+            for p in notify_mod.PUSH_PROVIDERS}
+
+
+def _phone_push_summary(cfg) -> str:
+    """One-line status for the config menu: which push providers are configured."""
+    on = [p["label"] for p in notify_mod.PUSH_PROVIDERS if cfg.get(p["config_key"])]
+    return ", ".join(on) if on else "off"
+
+
+def _enabled_push_providers(args):
+    """The push providers with a URL configured on `args`, unless phone push is
+    disabled. Deliberately NOT gated on a TTY: phone push is the channel for a
+    headless box you've walked away from, where the whole point is to reach your
+    phone precisely because there's no terminal watching."""
+    if not getattr(args, "phone_notify", True):
+        return []
+    push_cfg = getattr(args, "push_cfg", None) or {}
+    return [p for p in notify_mod.PUSH_PROVIDERS if push_cfg.get(p["config_key"])]
 
 
 def _notify_token():
@@ -318,8 +334,9 @@ def _notify_result(target, run, outcome, elapsed, args, note=""):
     stays quiet locally while still buzzing your phone."""
     if elapsed < NOTIFY_MIN_ELAPSED:
         return
-    local_on, push_on = _should_notify(args), _should_push(args)
-    if not local_on and not push_on:
+    local_on = _should_notify(args)
+    providers = _enabled_push_providers(args)
+    if not local_on and not providers:
         return
     title = f"repipe · {target.name}"
     n = f"#{run.number} " if run.number is not None else ""
@@ -334,13 +351,15 @@ def _notify_result(target, run, outcome, elapsed, args, note=""):
     msg, sound, priority, tags = table[outcome]
     if local_on:
         notify_mod.notify(title, msg, sound=sound)
-    if push_on:
-        notify_mod.push(
-            args.notify_url, title, msg,
-            priority=priority, tags=tags,
-            click=getattr(run, "web_url", "") or "",
-            token=_notify_token(),
-        )
+    if providers:
+        push_cfg, click, token = args.push_cfg, getattr(run, "web_url", "") or "", _notify_token()
+        for p in providers:
+            # priority/tags/token are ntfy-only; other senders accept and ignore
+            # them (**kwargs), so one uniform call fans out to every provider.
+            getattr(notify_mod, p["send"])(
+                push_cfg[p["config_key"]], title, msg,
+                priority=priority, tags=tags, click=click, token=token,
+            )
 
 
 def _notify_step(target, run, step, args):
@@ -483,7 +502,7 @@ def _run_args_namespace(**overrides):
         retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
         notify=True, notify_steps=False,
-        notify_url=None, phone_notify=True,
+        push_cfg=None, phone_notify=True,
     )
     d.update(overrides)
     return argparse.Namespace(**d)
@@ -521,7 +540,12 @@ def cmd_interactive(args) -> int:
     if not targets:
         raise RepipeError(f"no {provider.TARGET_WORD}s found in this repo.", EXIT_CONFIG)
 
-    interactive.banner(repo_key, provider.NAME, __version__)
+    # Only probe when the banner will actually render (a live TTY) — no wasted
+    # network call in piped/CI invocations of bare `repipe`.
+    newer = _update_available() if interactive.live() else None
+    note = (f"↑ repipe {newer} is available — run `repipe upgrade`"
+            if newer else None)
+    interactive.banner(repo_key, provider.NAME, __version__, update_note=note)
 
     st = {"provided": {}, "new_email": None, "vars_for": None, "total": 4}
 
@@ -651,7 +675,7 @@ def cmd_interactive(args) -> int:
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
-        notify_url=cfg.get("notify_url"),
+        push_cfg=_push_cfg_from(cfg),
     )
     code = _finish_run(provider, target, ref, variables, rargs,
                        confirmed=(target.env != "prod"))
@@ -726,14 +750,16 @@ def _version_tuple(v):
     return tuple(parts)
 
 
-def _latest_release(repo):
+def _latest_release(repo, timeout=30):
     """Return (version, asset_url) for the repo's latest GitHub Release, or
     (None, None). Reads the public Releases API unauthenticated — it never sends
     the user's token (which may be a Bitbucket credential), and the API is fresh
-    (no raw/branch CDN lag)."""
+    (no raw/branch CDN lag). `timeout` is kept short for the passive welcome-screen
+    check so it can't stall the banner."""
     try:
         data = json.loads(download_text(
-            f"https://api.github.com/repos/{repo}/releases/latest") or "{}")
+            f"https://api.github.com/repos/{repo}/releases/latest",
+            timeout=timeout) or "{}")
     except (RepipeError, ValueError):
         return None, None
     tag = data.get("tag_name") or ""
@@ -744,6 +770,56 @@ def _latest_release(repo):
             asset_url = asset.get("browser_download_url")
             break
     return (version or None), asset_url
+
+
+# Passive "update available" check shown on the welcome screen. Throttled to one
+# network probe per interval via a tiny cache file, so bare `repipe` stays fast.
+_UPDATE_CHECK_INTERVAL = 24 * 3600  # seconds (once a day)
+
+
+def _update_cache_path():
+    return os.path.join(config.config_dir(), "update-check.json")
+
+
+def _read_update_cache():
+    """(checked_at_epoch, cached_latest_version). (0, '') if no/unreadable cache."""
+    try:
+        with open(_update_cache_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return float(d.get("checked_at", 0)), str(d.get("latest") or "")
+    except Exception:
+        return 0.0, ""
+
+
+def _write_update_cache(latest):
+    try:
+        os.makedirs(config.config_dir(), exist_ok=True)
+        with open(_update_cache_path(), "w", encoding="utf-8") as f:
+            json.dump({"checked_at": time.time(), "latest": latest or ""}, f)
+    except Exception:
+        pass  # cache is an optimization — a failed write just means we re-check
+
+
+def _update_available(now=None):
+    """Best-effort: the newer version string if a published release is ahead of
+    the running build, else None. Probes the Releases API at most once per
+    _UPDATE_CHECK_INTERVAL (cached), never raises, and blocks only for a short
+    timeout. Silent when pinned (REPIPE_UPGRADE_VERSION) or opted out
+    (REPIPE_NO_UPDATE_CHECK)."""
+    if os.environ.get("REPIPE_NO_UPDATE_CHECK") or UPGRADE_VERSION:
+        return None
+    now = time.time() if now is None else now
+    checked_at, latest = _read_update_cache()
+    if now - checked_at >= _UPDATE_CHECK_INTERVAL:
+        fetched, _ = _latest_release(UPGRADE_REPO, timeout=3)
+        if fetched:
+            latest = fetched
+        # Stamp the attempt either way — preserves a good cached `latest` while
+        # still throttling retries when the API is unreachable.
+        _write_update_cache(latest)
+    if latest and _version_tuple(latest) > _version_tuple(__version__):
+        return latest
+    return None
 
 
 def _self_path():
@@ -870,7 +946,7 @@ def cmd_rerun(args) -> int:
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
-        notify_url=cfg.get("notify_url"),
+        push_cfg=_push_cfg_from(cfg),
     )
     return _finish_run(provider, target, ref, variables, rargs)
 
@@ -882,8 +958,12 @@ def cmd_rerun(args) -> int:
 _CONFIG_DEFAULTS = {
     "max_retries": 2, "match": "substring",
     "poll_interval": 20, "timeout": 3600,
-    "notify": True, "notify_steps": False, "notify_url": "",
+    "notify": True, "notify_steps": False,
 }
+# Each push provider contributes its (empty-by-default) URL key, so adding a
+# provider to the registry needs no change here.
+for _p in notify_mod.PUSH_PROVIDERS:
+    _CONFIG_DEFAULTS.setdefault(_p["config_key"], "")
 
 
 def _config_show(cfg) -> int:
@@ -897,7 +977,9 @@ def _config_show(cfg) -> int:
     print(f"  timeout        : {cfg.get('timeout', _CONFIG_DEFAULTS['timeout'])}s")
     print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
     print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
-    print(f"  phone push     : {cfg.get('notify_url') or '(off)'}")
+    print(f"  phone push     : {_phone_push_summary(cfg)}")
+    for p in notify_mod.PUSH_PROVIDERS:
+        print(f"    {p['label']:<12} : {cfg.get(p['config_key']) or '(off)'}")
     print(f"  autofill email : {cfg.get('user_email') or '(unset)'}")
     print(f"\nfile: {config.config_path()}")
     return EXIT_OK
@@ -1225,47 +1307,69 @@ def _random_ntfy_url() -> str:
     return "https://ntfy.sh/repipe-" + secrets.token_hex(16)
 
 
-def _edit_notify_url(cfg) -> bool:
-    """Set / clear the ntfy topic URL for phone push. Offers to GENERATE a random
-    topic (the safe default — a user-picked name is easy to guess), then a test
-    send so the user can confirm their phone is subscribed before relying on it."""
-    cur = cfg.get("notify_url") or ""
-    print("Phone push sends the finish notification to an ntfy topic on your")
-    print("phone — it fires even with no terminal watching.")
-    rows = [
-        ("gen", "Generate a random ntfy.sh topic (recommended)"),
-        ("manual", "Enter a topic URL myself"),
-    ]
+def _edit_phone_push(cfg) -> bool:
+    """Submenu: pick which push destination to configure. Every provider in the
+    registry is listed with its current URL; each is edited independently and any
+    number can be active at once — all configured providers fire on a run event."""
+    changed = False
+    while True:
+        rows = [(p, f"{p['label']:<12} {cfg.get(p['config_key']) or '(off)'}")
+                for p in notify_mod.PUSH_PROVIDERS]
+        sel = interactive.pick("Phone push", rows, to_str=lambda r: r[1])
+        if sel is interactive.BACK:
+            return changed
+        changed = _edit_push_provider(cfg, sel[0]) or changed
+
+
+def _edit_push_provider(cfg, provider) -> bool:
+    """Set / clear one provider's URL, then offer a test send so the user can
+    confirm their phone before relying on it. ntfy can GENERATE a random topic
+    (a user-picked name is easy to guess); other providers paste a URL from the
+    destination's own UI (e.g. a Google Chat incoming-webhook)."""
+    key, label = provider["config_key"], provider["label"]
+    cur = cfg.get(key) or ""
+    if provider["id"] == "gchat":
+        print("Google Chat phone push posts to a private space's incoming webhook —")
+        print('a "space of one" reaches only you. In Google Chat create a space')
+        print("(invite nobody), then Apps & integrations → Manage webhooks → Add,")
+        print("and paste the URL below. Keep it private — it is the credential.")
+    else:
+        print(f"{label} phone push sends the finish notification to your phone —")
+        print("it fires even with no terminal watching.")
+    rows = []
+    if provider["can_generate"]:
+        rows.append(("gen", "Generate a random ntfy.sh topic (recommended)"))
+    rows.append(("manual", f"Enter the {label} URL myself"))
     if cur:
-        rows.append(("off", "Turn phone push off"))
-    sel = interactive.pick("Phone push (ntfy)", rows, to_str=lambda x: x[1])
+        rows.append(("off", f"Turn {label} off"))
+    sel = interactive.pick(label, rows, to_str=lambda x: x[1])
     if sel is interactive.BACK:
         return False
     changed = False
     if sel[0] == "gen":
-        cfg["notify_url"] = _random_ntfy_url()
+        cfg[key] = _random_ntfy_url()
         changed = True
-        print(f"{interactive.green('✓')} generated: {cfg['notify_url']}")
+        print(f"{interactive.green('✓')} generated: {cfg[key]}")
         print("  → open the ntfy app on your phone and subscribe to that topic")
         print("    (copy the part after the last '/'). Keep this URL private.")
     elif sel[0] == "manual":
-        raw = interactive.ask("ntfy URL", default=cur or None)
+        raw = interactive.ask(f"{label} URL", default=cur or None)
         if raw is not interactive.BACK:
             raw = str(raw).strip()
             if raw and raw != cur:
-                cfg["notify_url"] = raw
+                cfg[key] = raw
                 changed = True
     elif sel[0] == "off":
-        cfg.pop("notify_url", None)
+        cfg.pop(key, None)
         changed = True
-        print(f"{interactive.green('✓')} phone push turned off")
-    url = cfg.get("notify_url")
+        print(f"{interactive.green('✓')} {label} turned off")
+    url = cfg.get(key)
     if url and interactive.confirm("Send a test push now?", default=True):
-        notify_mod.push(url, "repipe · test",
-                        "phone push is wired up ✓", tags="bell",
-                        token=_notify_token())
+        getattr(notify_mod, provider["send"])(
+            url, "repipe · test", "phone push is wired up ✓",
+            tags="bell", click="", token=_notify_token())
         print(f"{interactive.green('✓')} sent — check your phone "
-              "(nothing arriving? verify the topic + that the app is subscribed)")
+              "(nothing arriving? verify the destination is set up correctly)")
     return changed
 
 
@@ -1286,7 +1390,7 @@ def cmd_config(args) -> int:
             ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
             ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
             ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
-            ("notify_url", f"Phone push (ntfy) {cfg.get('notify_url') or '(off)'}"),
+            ("phone_push", f"Phone push        {_phone_push_summary(cfg)}  ›"),
             ("user_email", f"Email (autofill)  {cfg.get('user_email') or '(unset)'}"),
             ("repo", "Repo settings     ›"),
             ("save", "Save & exit"),
@@ -1330,8 +1434,8 @@ def cmd_config(args) -> int:
             if new != cur:
                 cfg[key] = new
                 dirty = True
-        elif key == "notify_url":
-            dirty = _edit_notify_url(cfg) or dirty
+        elif key == "phone_push":
+            dirty = _edit_phone_push(cfg) or dirty
         elif key == "user_email":
             print(interactive.dim(
                 "  Used to autofill pipeline variables (autofill = \"git_email\") "
@@ -1601,15 +1705,19 @@ def cmd_doctor(args) -> int:
     # 6. Notifications
     print(f"  {ok if cfg.get('notify', True) else info} desktop alerts "
           f"{'on' if cfg.get('notify', True) else 'off'}")
-    url = cfg.get("notify_url")
-    if not url:
+    enabled = [p for p in notify_mod.PUSH_PROVIDERS if cfg.get(p["config_key"])]
+    if not enabled:
         print(f"  {info} phone push     off (`repipe config` → Phone push)")
-    elif interactive.live():
-        notify_mod.push(url, "repipe · doctor", "doctor test push ✓",
-                        tags="stethoscope", token=_notify_token())
-        print(f"  {ok} phone push     configured — test sent, check your phone")
     else:
-        print(f"  {ok} phone push     configured (run in a terminal to send a test)")
+        labels = ", ".join(p["label"] for p in enabled)
+        if interactive.live():
+            for p in enabled:
+                getattr(notify_mod, p["send"])(
+                    cfg[p["config_key"]], "repipe · doctor", "doctor test push ✓",
+                    tags="stethoscope", click="", token=_notify_token())
+            print(f"  {ok} phone push     {labels} configured — test sent, check your phone")
+        else:
+            print(f"  {ok} phone push     {labels} configured (run in a terminal to send a test)")
 
     print()
     if failed:

@@ -239,12 +239,12 @@ class PushGating(unittest.TestCase):
     """_notify_result routes to the phone channel on a url-gate, not a TTY-gate."""
 
     def _push(self, outcome, elapsed=100, **over):
+        over.setdefault("push_cfg", {"notify_url": "https://ntfy.sh/t"})
         with mock.patch.object(cli.interactive, "live", return_value=False), \
                 mock.patch.object(cli, "_notify_token", return_value=None), \
                 mock.patch.object(cli.notify_mod, "notify") as local, \
                 mock.patch.object(cli.notify_mod, "push") as push:
-            cli._notify_result(TARGET, RUN, outcome, elapsed,
-                               _args(notify_url="https://ntfy.sh/t", **over))
+            cli._notify_result(TARGET, RUN, outcome, elapsed, _args(**over))
         return local, push
 
     def test_fires_headless_when_url_set(self):
@@ -282,13 +282,107 @@ class PushGating(unittest.TestCase):
         push.assert_not_called()
 
 
+class PushGchatTransport(unittest.TestCase):
+    """notify.push_gchat builds a cardsV2 webhook POST and never raises."""
+
+    def _capture(self, *a, **kw):
+        cap = {}
+
+        def fake(req, timeout=None):
+            cap["req"] = req
+            cap["timeout"] = timeout
+            cap["body"] = json.loads(req.data.decode("utf-8")) if req.data else {}
+            return Resp()
+
+        with mock.patch.object(notify_mod.urllib.request, "urlopen", side_effect=fake):
+            notify_mod.push_gchat(*a, **kw)
+        return cap
+
+    def test_posts_cardsv2_to_webhook_url_verbatim(self):
+        url = "https://chat.googleapis.com/v1/spaces/AAA/messages?key=k&token=t"
+        cap = self._capture(url, "repipe · deploy", "✓ #158 succeeded",
+                            click="https://ci/158")
+        req, body = cap["req"], cap["body"]
+        # posted to the webhook URL as-is (no topic extraction like ntfy)
+        self.assertEqual(req.full_url, url)
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(cap["timeout"], 5)
+        card = body["cardsV2"][0]["card"]
+        self.assertEqual(card["header"]["title"], "repipe · deploy")
+        widgets = card["sections"][0]["widgets"]
+        self.assertEqual(widgets[0]["decoratedText"]["text"], "✓ #158 succeeded")
+        btn = widgets[1]["buttonList"]["buttons"][0]
+        self.assertEqual(btn["onClick"]["openLink"]["url"], "https://ci/158")
+
+    def test_button_omitted_without_click(self):
+        body = self._capture("https://chat.googleapis.com/x", "T", "M")["body"]
+        widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
+        self.assertEqual(len(widgets), 1)  # decoratedText only, no buttonList
+
+    def test_ignores_ntfy_only_kwargs(self):
+        # dispatch fans out one uniform call; gchat must swallow priority/tags/token
+        self._capture("https://chat.googleapis.com/x", "T", "M",
+                      priority="high", tags="x", token="tk")  # must not raise
+
+    def test_no_url_is_a_noop(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen") as u:
+            notify_mod.push_gchat("", "T", "M")
+        u.assert_not_called()
+
+    def test_network_error_is_swallowed(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen",
+                               side_effect=OSError("boom")):
+            notify_mod.push_gchat("https://chat.googleapis.com/x", "T", "M")
+
+
+class MultiProviderDispatch(unittest.TestCase):
+    """_notify_result fans a run event out to EVERY configured provider."""
+
+    def _run(self, push_cfg, **over):
+        over.setdefault("phone_notify", True)
+        with mock.patch.object(cli.interactive, "live", return_value=False), \
+                mock.patch.object(cli, "_notify_token", return_value=None), \
+                mock.patch.object(cli.notify_mod, "notify"), \
+                mock.patch.object(cli.notify_mod, "push") as ntfy, \
+                mock.patch.object(cli.notify_mod, "push_gchat") as gchat:
+            cli._notify_result(TARGET, RUN, "success", 100,
+                               _args(push_cfg=push_cfg, **over))
+        return ntfy, gchat
+
+    def test_both_fire_when_both_configured(self):
+        ntfy, gchat = self._run({
+            "notify_url": "https://ntfy.sh/t",
+            "notify_gchat_url": "https://chat.googleapis.com/x",
+        })
+        ntfy.assert_called_once()
+        gchat.assert_called_once()
+        self.assertEqual(gchat.call_args.kwargs["click"], RUN.web_url)
+
+    def test_only_configured_provider_fires(self):
+        ntfy, gchat = self._run({"notify_gchat_url": "https://chat.googleapis.com/x"})
+        ntfy.assert_not_called()
+        gchat.assert_called_once()
+
+    def test_phone_off_suppresses_all(self):
+        ntfy, gchat = self._run(
+            {"notify_url": "https://ntfy.sh/t",
+             "notify_gchat_url": "https://chat.googleapis.com/x"},
+            phone_notify=False)
+        ntfy.assert_not_called()
+        gchat.assert_not_called()
+
+
 class NotifyUrlConfig(unittest.TestCase):
-    def test_notify_url_survives_round_trip(self):
+    def test_provider_urls_survive_round_trip(self):
         import tomllib
         from repipe import config as cfgmod
-        cfg = {"notify_url": "https://ntfy.sh/repipe-secret", "notify": True}
+        cfg = {"notify_url": "https://ntfy.sh/repipe-secret",
+               "notify_gchat_url": "https://chat.googleapis.com/v1/spaces/A/messages?key=k",
+               "notify": True}
         loaded = tomllib.loads(cfgmod.dumps(cfg))
         self.assertEqual(loaded["notify_url"], "https://ntfy.sh/repipe-secret")
+        self.assertEqual(loaded["notify_gchat_url"],
+                         "https://chat.googleapis.com/v1/spaces/A/messages?key=k")
 
 
 if __name__ == "__main__":

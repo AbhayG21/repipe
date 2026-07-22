@@ -1,19 +1,26 @@
-"""Best-effort notifications — a local desktop channel and a remote phone channel.
+"""Best-effort notifications — a local desktop channel and remote phone channels.
 
 Zero-dependency: the local channel shells out to the platform's native notifier
-and degrades to the terminal bell; the remote channel does one stdlib urllib POST
-to ntfy. Every path is wrapped so a notification failure can NEVER affect the
-watch loop's behavior or exit code.
+and degrades to the terminal bell; the remote channels do one stdlib urllib POST
+each. Every path is wrapped so a notification failure can NEVER affect the watch
+loop's behavior or exit code.
 
 Local (`notify`):
 - macOS  → osascript `display notification` (default sound only when sound=True)
 - Linux  → notify-send, if it's installed (desktop only; absent on servers)
 - else   → BEL (\\a) to stderr: rings the bell / flags the tab in most terminals
 
-Remote (`push`): POST to an ntfy topic URL. Unlike the local channel this has no
-TTY requirement — it's the channel for a headless box (a VM you've walked away
-from), where the point is to reach your phone precisely because there's no
-terminal to watch.
+Remote (phone push): one POST per configured provider. Unlike the local channel
+these have no TTY requirement — they're the channel for a headless box (a VM
+you've walked away from), where the point is to reach your phone precisely because
+there's no terminal to watch.
+
+Providers are pluggable via `PUSH_PROVIDERS`: each entry names a config key holding
+its URL and a sender attribute on this module. Adding a destination (Slack, …) is
+one registry entry + one `push_*` function — the CLI menu, dispatch, and `doctor`
+all iterate the registry, so no wiring changes elsewhere.
+- ntfy        (`push`)        — a public/self-hosted topic, header-safe JSON publish
+- Google Chat (`push_gchat`)  — a private "space of one" incoming webhook, cardsV2
 """
 
 import json
@@ -118,3 +125,61 @@ def push(url, title, message, priority="default", tags="", click="", token=None)
         urllib.request.urlopen(req, timeout=5).close()
     except Exception:
         pass  # remote push is strictly best-effort — never surface to the loop
+
+
+def push_gchat(url, title, message, click="", **_):
+    """POST a notification to a Google Chat incoming-webhook URL, best-effort.
+    Never raises — a failed push is swallowed exactly like `push`, so it can't
+    affect the watch loop or exit code.
+
+    Personal push on Google Chat is a "space of one": you create a private space
+    with no other members and add an incoming webhook to it, so a message posted
+    here reaches only you (your phone's Chat app delivers it).
+
+    Formats as a cardsV2 message — a header with the title, the status line as
+    decorated text, and (when `click` is set) a button that opens the pipeline run.
+    Unlike ntfy there is no topic/priority/tags/token machinery: the webhook URL
+    already carries its own `key`+`token` credential, so we POST it verbatim.
+
+    Ignores extra keyword args (priority/tags/token) so the dispatch loop can call
+    every provider's sender with one uniform argument set.
+    """
+    if not url:
+        return
+    try:
+        widgets = [{"decoratedText": {"text": str(message)}}]
+        if click:
+            widgets.append({"buttonList": {"buttons": [
+                {"text": "Open pipeline",
+                 "onClick": {"openLink": {"url": str(click)}}},
+            ]}})
+        payload = {"cardsV2": [{
+            "cardId": "repipe",
+            "card": {
+                "header": {"title": str(title or "repipe")},
+                "sections": [{"widgets": widgets}],
+            },
+        }]}
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json; charset=UTF-8"},
+        )
+        urllib.request.urlopen(req, timeout=5).close()
+    except Exception:
+        pass  # best-effort — never surface to the loop
+
+
+# Pluggable phone-push providers. `config_key` is the config field holding the
+# provider's URL/webhook; `send` is the name of this module's sender function
+# (referenced by name, not object, so the CLI's dispatch/menu/doctor stay
+# mockable and new providers register without touching call sites);
+# `can_generate` marks providers whose URL the config menu can auto-generate
+# (ntfy topics — the rest are pasted from the provider's own UI).
+PUSH_PROVIDERS = [
+    {"id": "ntfy", "label": "ntfy", "config_key": "notify_url",
+     "can_generate": True, "send": "push"},
+    {"id": "gchat", "label": "Google Chat", "config_key": "notify_gchat_url",
+     "can_generate": False, "send": "push_gchat"},
+]

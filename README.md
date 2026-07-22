@@ -34,6 +34,8 @@ repipe upgrade --check    # just report installed vs latest release
 
 Upgrades track the latest **GitHub Release** (not `main`), read straight from the Releases API — so `--check` is always current, with no CDN lag. Pin an exact version with `REPIPE_UPGRADE_VERSION=v1.6.0 repipe upgrade`.
 
+You don't have to remember to check: the interactive **welcome screen** (bare `repipe`) shows a quiet `↑ repipe X.Y.Z is available` line when a newer release exists. The check is best-effort and **throttled to once a day** (cached in `update-check.json` in the config dir), so it never slows the CLI down, and it stays silent when offline. Opt out entirely with `REPIPE_NO_UPDATE_CHECK=1`.
+
 Your config (`~/.config/repipe/config.toml`) and credentials are untouched — only the binary is swapped (atomically, after verifying the download runs). Re-running the install one-liner does the same thing.
 
 ## Authentication
@@ -107,7 +109,7 @@ repipe status <a-recent-build-number>
 
 If it prints a real state, you're set. Common HTTP codes if you debug with `curl`: `200` = good; `401` = token rejected (wrong type/value — e.g. an API token used as Bearer); `403` = authenticated but missing a scope; `404` on the repo root usually means no `read:repository` scope (harmless — repipe only calls `/pipelines/…`).
 
-Or run **`repipe doctor`** for an all-in-one check — it confirms your credentials resolve and pass a read-only auth probe, that your config parses, whether auto-retry patterns are set, and (when `notify_url` is configured) fires a test push to your phone. Exit code `0` = healthy, `3` = something's wrong.
+Or run **`repipe doctor`** for an all-in-one check — it confirms your credentials resolve and pass a read-only auth probe, that your config parses, whether auto-retry patterns are set, and (when a phone-push provider is configured) fires a test push to your phone. Exit code `0` = healthy, `3` = something's wrong.
 
 Never commit tokens. `config.toml` is for non-secret defaults only, and `.gitignore` covers any `credentials` file.
 
@@ -176,23 +178,38 @@ repipe run -p deploy-qa --notify-steps  # also ping as each step/job completes
 
 Mechanism is zero-dependency and best-effort: macOS uses `osascript`, Linux uses `notify-send` when present, and anything else falls back to the terminal bell. A notification never affects the run's outcome or exit code. Set `notify` / `notify_steps` in config to make your choice the default.
 
-#### Push to your phone (ntfy)
+#### Push to your phone (ntfy or Google Chat)
 
-The desktop notification above needs a terminal — which is exactly what you *don't* have when you run repipe on an always-on box and close your laptop. For that, point `notify_url` at an [ntfy](https://ntfy.sh) topic and the finish notification (and each retry) is pushed to your **phone**. This channel is **independent of the TTY gate**: it fires precisely because there's no terminal watching. Tapping the banner opens the run.
+The desktop notification above needs a terminal — which is exactly what you *don't* have when you run repipe on an always-on box and close your laptop. For that, configure one or more **phone-push providers** and the finish notification (and each retry) is pushed to your **phone**. This channel is **independent of the TTY gate**: it fires precisely because there's no terminal watching. Tapping the banner opens the run.
+
+Providers are pluggable — configure any combination and **every** enabled one fires:
+
+| Provider | Best for | Set-up |
+| --- | --- | --- |
+| **ntfy** | zero-setup personal push | repipe generates a random topic; subscribe in the ntfy app |
+| **Google Chat** | a personal feed inside a Google-Chat org | paste an incoming-webhook URL from a private space |
 
 ```bash
-repipe config                          # → "Phone push (ntfy)" → generate a topic → send a test
-repipe run -p deploy-qa                # pushes on finish when notify_url is set
+repipe config                          # → "Phone push ›" → pick a provider → send a test
+repipe run -p deploy-qa                # pushes on finish when a provider is configured
 repipe run -p deploy-qa --no-phone-notify   # skip the phone for this run
 ```
 
-Set it up: run `repipe config → Phone push (ntfy)` and pick **Generate a random ntfy.sh topic** — repipe mints a hard-to-guess topic for you (don't hand-pick a name; a guessable one is readable by anyone). Then install the ntfy app, subscribe to that topic, and use the built-in **send a test** to confirm it reaches your phone. It lands in config as:
+**ntfy** — run `repipe config → Phone push → ntfy` and pick **Generate a random ntfy.sh topic** (don't hand-pick a name; a guessable one is readable by anyone). Install the ntfy app, subscribe to that topic, and use **send a test** to confirm. It lands in config as `notify_url = "https://ntfy.sh/repipe-<random>"`.
 
-```toml
-notify_url = "https://ntfy.sh/repipe-<random>"
-```
+> **Use a long, random topic.** On the public ntfy.sh server anyone who knows the topic name can read your notifications — treat it like a password. Reserved or self-hosted topics that require auth: put the token in the credentials file as `REPIPE_NOTIFY_TOKEN` (env also works), never in `config.toml`.
 
-> **Use a long, random topic.** On the public ntfy.sh server anyone who knows the topic name can read your notifications — treat it like a password. Reserved or self-hosted topics that require auth: put the token in the credentials file as `REPIPE_NOTIFY_TOKEN` (env also works), never in `config.toml`. Like the local channel, a failed push never affects the run's outcome or exit code.
+**Google Chat (personal push)** — Google Chat can only webhook into a *space*, not a DM, so the personal pattern is a **space of one**: a private space that only you are in, so anything posted there notifies only you. Set it up once:
+
+1. **Create the space.** In Google Chat: **+ New space → Create a space**, name it (e.g. `repipe alerts`), and **invite nobody**.
+2. **Add a webhook.** Open the space's menu (click its name) → **Apps & integrations → Manage webhooks → Add**, name it (e.g. `repipe`), and **Save**.
+3. **Copy the webhook URL** — `https://chat.googleapis.com/v1/spaces/AAAA…/messages?key=…&token=…`.
+4. **Tell repipe:** `repipe config → Phone push → Google Chat → Enter the URL myself`, paste it, and answer **yes** to *Send a test push now?* A `repipe · test` card should appear in your space.
+5. **Get it on your phone:** install the **Google Chat** app (or use the Gmail Chat tab), signed into the same account, with notifications enabled and the space un-muted.
+
+It lands in config as `notify_gchat_url = "https://chat.googleapis.com/v1/spaces/…"`. On a real run you get a card — header `repipe · <pipeline>`, the status line (`✓ #158 succeeded` / `✗ failed` / `↻ retrying`), and an **Open pipeline** button.
+
+> The webhook URL *is* the credential (its `key`+`token` query params) — keep it private, like the ntfy topic. Your org admin can disable incoming webhooks entirely (Admin console → Apps → Google Chat); if **Manage webhooks** isn't there, that's why, and there's no repipe-side workaround. Like every notification path, a failed push never affects the run's outcome or exit code.
 
 ## Configuration
 

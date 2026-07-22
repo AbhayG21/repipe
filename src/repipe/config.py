@@ -76,9 +76,11 @@ def _val(v) -> str:
 
 
 def dumps(cfg: dict) -> str:
+    from . import notify  # provider config keys, so they round-trip losslessly
+    push_keys = tuple(p["config_key"] for p in notify.PUSH_PROVIDERS)
     lines = []
     for k in ("user_email", "match", "max_retries",
-              "poll_interval", "timeout", "notify", "notify_steps", "notify_url"):
+              "poll_interval", "timeout", "notify", "notify_steps") + push_keys:
         if k in cfg:
             lines.append(f"{k} = {_val(cfg[k])}")
     if "retry_on" in cfg:
