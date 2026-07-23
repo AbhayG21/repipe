@@ -1,4 +1,8 @@
-# repipe
+<p align="center">
+  <img src="repipe.png" alt="repipe logo" width="150">
+</p>
+
+<h1 align="center">repipe</h1>
 
 Trigger a CI pipeline on demand and **auto-retry it when it fails with a transient error** — from one word on the command line.
 
@@ -12,6 +16,16 @@ Trigger a CI pipeline on demand and **auto-retry it when it fails with a transie
 
 ## Install
 
+### Homebrew (macOS)
+
+```bash
+brew install abhayg21/tap/repipe
+```
+
+Pulls from the [tap](https://github.com/AbhayG21/homebrew-tap) and runs repipe through Homebrew's `python@3.12`. Update with `brew upgrade repipe`.
+
+### curl (macOS / Linux)
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | bash
 ```
@@ -24,6 +38,17 @@ To install from a local clone:
 git clone <this-repo> && cd repipe
 bash install.sh          # uses the built ./repipe next to the script
 ```
+
+### First-time setup
+
+```bash
+repipe login             # store a CI credential (see Authentication below)
+cd your-repo && repipe init   # scaffold config for this repo (provider auto-detected)
+repipe config            # optional: retry patterns, notifications, phone push
+repipe doctor            # confirm creds, auth, config, and alerts are wired up
+```
+
+`repipe` reads/writes a single non-secret config at `~/.config/repipe/config.toml` (see [Configuration](#configuration)); credentials live separately (see [Authentication](#authentication)). Both survive upgrades.
 
 ## Upgrading
 

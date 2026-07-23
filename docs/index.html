@@ -215,7 +215,7 @@
 
 <header>
   <div class="wrap bar">
-    <span class="brand"><span class="prompt">$ </span>repipe</span>
+    <span class="brand"><img src="repipe.png" alt="" style="height:24px;width:24px;border-radius:6px;vertical-align:-6px;margin-right:8px">repipe</span>
     <nav>
       <a class="navlink" href="#features">Features</a>
       <a class="navlink" href="#start">Quick start</a>
@@ -229,6 +229,7 @@
 
 <main>
   <div class="wrap hero">
+    <img src="repipe.png" alt="repipe logo" style="height:88px;width:88px;border-radius:20px;display:block;margin-bottom:22px;box-shadow:0 6px 24px rgba(0,0,0,.35)">
     <p class="eyebrow">Zero-dependency CI retry CLI</p>
     <h1>Trigger a pipeline. It <span class="hl">retries the flaky failures</span> for you.</h1>
     <p class="lede">repipe fires a CI pipeline on demand, watches it, and auto-retries when it fails with a transient error you configure — from one word on the command line. One stdlib Python file, installed with one curl.</p>
@@ -250,6 +251,7 @@
       <code id="install"><span class="tok">curl</span> -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | <span class="tok">bash</span></code>
       <button class="copybtn" data-copy="#install">copy</button>
     </div>
+    <p class="lede" style="margin-top:10px;font-size:15px">…or on macOS: <code>brew install abhayg21/tap/repipe</code></p>
 
     <div class="term" aria-label="Example repipe session">
       <div class="term-top">
@@ -295,8 +297,12 @@
           <div class="n">1</div>
           <div>
             <h3>Install</h3>
-            <p>Drops <code>repipe</code> into <code>~/.local/bin</code> and checks for python3.</p>
-            <pre><span class="cy">curl</span> -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | <span class="cy">bash</span></pre>
+            <p>Homebrew on macOS, or the curl one-liner (drops <code>repipe</code> into <code>~/.local/bin</code>, checks for python3) anywhere.</p>
+            <pre><span class="cm"># macOS</span>
+<span class="cy">brew</span> install abhayg21/tap/repipe
+
+<span class="cm"># or, any platform</span>
+<span class="cy">curl</span> -fsSL https://raw.githubusercontent.com/AbhayG21/repipe/main/install.sh | <span class="cy">bash</span></pre>
           </div>
         </div>
         <div class="step">
