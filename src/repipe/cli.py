@@ -7,6 +7,7 @@ import os
 import secrets
 import sys
 import time
+import urllib.parse
 
 from . import __version__
 from .errors import (
@@ -175,6 +176,10 @@ def cmd_run(args) -> int:
     if getattr(args, "phone_notify", None) is None:
         args.phone_notify = True
     args.push_cfg = _push_cfg_from(cfg)
+    args.notify_events = cfg.get("notify_events")
+    # Retry patterns: explicit --retry-on wins, else per-repo override, else the
+    # global default. (Previously `run` ignored config retry_on entirely.)
+    args.retry_on = _resolve_retry(cfg, f"{workspace}/{repo}", args.retry_on)
 
     return _finish_run(provider, target, ref, variables, args)
 
@@ -283,6 +288,36 @@ def _push_cfg_from(cfg) -> dict:
             for p in notify_mod.PUSH_PROVIDERS}
 
 
+def _resolve_retry(cfg, repo_key, explicit=None):
+    """Effective retry_on patterns for a run. Precedence: an explicit --retry-on
+    wins; else the repo's own override (`[repos."ws/repo"].retry_on`, which fully
+    REPLACES the default when present); else the global default `retry_on`. This
+    one rule is shared by `run`, the interactive flow, and `rerun`."""
+    if explicit:
+        return explicit
+    repo_patterns = config.get_repo(cfg, repo_key).get("retry_on")
+    if repo_patterns:
+        return list(repo_patterns)
+    return cfg.get("retry_on")
+
+
+def _mask_secret(url: str) -> str:
+    """Mask a webhook/topic URL for display: keep scheme + host, replace the rest
+    with `…` but keep the last 4 chars for recognisability. The path/query is the
+    credential (ntfy topic, or a Google Chat / Slack key+token), so it must never
+    be printed in full where output can be screenshotted or pasted."""
+    s = str(url or "")
+    if not s:
+        return s
+    parts = urllib.parse.urlsplit(s)
+    if parts.scheme and parts.netloc:
+        rest = s[len(f"{parts.scheme}://{parts.netloc}"):]
+        if len(rest) <= 4:
+            return s  # nothing secret-length to hide
+        return f"{parts.scheme}://{parts.netloc}/…{rest[-4:]}"
+    return s[:4] + "…" + s[-4:] if len(s) > 8 else s
+
+
 def _phone_push_summary(cfg) -> str:
     """One-line status for the config menu: which push providers are configured."""
     on = [p["label"] for p in notify_mod.PUSH_PROVIDERS if cfg.get(p["config_key"])]
@@ -298,6 +333,43 @@ def _enabled_push_providers(args):
         return []
     push_cfg = getattr(args, "push_cfg", None) or {}
     return [p for p in notify_mod.PUSH_PROVIDERS if push_cfg.get(p["config_key"])]
+
+
+# The whole-run outcomes a notification can fire for, with menu labels. Order is
+# the display order in the "Notify on events" submenu.
+_NOTIFY_EVENTS = [
+    ("success", "success"),
+    ("failed", "failure"),
+    ("timeout", "timeout"),
+    ("halted", "paused at a gate"),
+    ("retry", "retry"),
+]
+_NOTIFY_EVENT_KEYS = [k for k, _ in _NOTIFY_EVENTS]
+
+
+def _enabled_events(cfg) -> set:
+    """The set of run outcomes that should notify. Absent `notify_events` key ⇒
+    all on (the default); an explicit list is honored verbatim (even if empty =
+    none)."""
+    v = cfg.get("notify_events")
+    if v is None:
+        return set(_NOTIFY_EVENT_KEYS)
+    return set(v)
+
+
+def _event_enabled(args, outcome) -> bool:
+    """Whether `outcome` should notify, per args.notify_events (None ⇒ all on)."""
+    events = getattr(args, "notify_events", None)
+    return True if events is None else outcome in events
+
+
+def _notify_events_summary(cfg) -> str:
+    on = _enabled_events(cfg)
+    if on == set(_NOTIFY_EVENT_KEYS):
+        return "all"
+    if not on:
+        return "none"
+    return ", ".join(lbl for k, lbl in _NOTIFY_EVENTS if k in on)
 
 
 def _notify_token():
@@ -334,6 +406,8 @@ def _notify_result(target, run, outcome, elapsed, args, note=""):
     stays quiet locally while still buzzing your phone."""
     if elapsed < NOTIFY_MIN_ELAPSED:
         return
+    if not _event_enabled(args, outcome):
+        return  # this outcome is toggled off (applies to every channel)
     local_on = _should_notify(args)
     providers = _enabled_push_providers(args)
     if not local_on and not providers:
@@ -502,7 +576,7 @@ def _run_args_namespace(**overrides):
         retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
         notify=True, notify_steps=False,
-        push_cfg=None, phone_notify=True,
+        push_cfg=None, phone_notify=True, notify_events=None,
     )
     d.update(overrides)
     return argparse.Namespace(**d)
@@ -670,12 +744,13 @@ def cmd_interactive(args) -> int:
         dry_run=args.dry_run, yes=args.yes,
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
-        retry_on=cfg.get("retry_on"),
+        retry_on=_resolve_retry(cfg, repo_key),
         poll_interval=cfg.get("poll_interval", 20),
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
         push_cfg=_push_cfg_from(cfg),
+        notify_events=cfg.get("notify_events"),
     )
     code = _finish_run(provider, target, ref, variables, rargs,
                        confirmed=(target.env != "prod"))
@@ -941,12 +1016,13 @@ def cmd_rerun(args) -> int:
         dry_run=args.dry_run, yes=args.yes,
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
-        retry_on=cfg.get("retry_on"),
+        retry_on=_resolve_retry(cfg, key),
         poll_interval=cfg.get("poll_interval", 20),
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
         notify_steps=cfg.get("notify_steps", False),
         push_cfg=_push_cfg_from(cfg),
+        notify_events=cfg.get("notify_events"),
     )
     return _finish_run(provider, target, ref, variables, rargs)
 
@@ -966,22 +1042,32 @@ for _p in notify_mod.PUSH_PROVIDERS:
     _CONFIG_DEFAULTS.setdefault(_p["config_key"], "")
 
 
-def _config_show(cfg) -> int:
-    """Non-interactive dump of effective global settings (no TTY needed)."""
+def _config_show(cfg, reveal=False) -> int:
+    """Non-interactive dump of effective global settings (no TTY needed). Webhook
+    URLs are masked by default (they carry credentials); `reveal` prints them in
+    full."""
     onoff = lambda b: "on" if b else "off"
+    show_url = (lambda u: u) if reveal else _mask_secret
     print("repipe global config:")
-    print(f"  retry patterns : {len(cfg.get('retry_on') or [])}")
+    print(f"  default retries: {len(cfg.get('retry_on') or [])} pattern(s)")
     print(f"  max retries    : {cfg.get('max_retries', _CONFIG_DEFAULTS['max_retries'])}")
     print(f"  match mode     : {cfg.get('match', _CONFIG_DEFAULTS['match'])}")
     print(f"  poll interval  : {cfg.get('poll_interval', _CONFIG_DEFAULTS['poll_interval'])}s")
     print(f"  timeout        : {cfg.get('timeout', _CONFIG_DEFAULTS['timeout'])}s")
     print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
     print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
+    print(f"  notify events  : {_notify_events_summary(cfg)}")
     print(f"  phone push     : {_phone_push_summary(cfg)}")
     for p in notify_mod.PUSH_PROVIDERS:
-        print(f"    {p['label']:<12} : {cfg.get(p['config_key']) or '(off)'}")
+        url = cfg.get(p["config_key"])
+        print(f"    {p['label']:<12} : {show_url(url) if url else '(off)'}")
     print(f"  autofill email : {cfg.get('user_email') or '(unset)'}")
+    repo_overrides = [k for k, r in (cfg.get("repos") or {}).items() if r.get("retry_on")]
+    if repo_overrides:
+        print(f"  repo retry overrides: {', '.join(repo_overrides)}")
     print(f"\nfile: {config.config_path()}")
+    if not reveal:
+        print("(webhook URLs masked — use `repipe config --show --reveal` to see them)")
     return EXIT_OK
 
 
@@ -1006,11 +1092,13 @@ def _ask_int(label, current, minimum):
         return v
 
 
-def _edit_patterns(cfg) -> bool:
-    """Sub-editor for the global `retry_on` list. Returns True if it changed."""
+def _edit_patterns(container, title="Retry patterns") -> bool:
+    """Sub-editor for a `retry_on` list. `container` is the dict that holds the
+    key — the global `cfg` (default patterns) or a per-repo dict (override).
+    Returns True if it changed."""
     changed = False
     while True:
-        patterns = list(cfg.get("retry_on") or [])
+        patterns = list(container.get("retry_on") or [])
         if patterns:
             print(interactive.dim("current retry patterns:"))
             for i, p in enumerate(patterns, 1):
@@ -1023,7 +1111,7 @@ def _edit_patterns(cfg) -> bool:
             ("remove", "Remove…"),
             ("done", "Done"),
         ]
-        act = interactive.pick("Retry patterns", actions,
+        act = interactive.pick(title, actions,
                                to_str=lambda a: a[1], allow_back=False)[0]
         if act == "done":
             return changed
@@ -1035,13 +1123,13 @@ def _edit_patterns(cfg) -> bool:
             sel = interactive.pick("Add which pattern?", avail)
             if sel is interactive.BACK:
                 continue
-            cfg["retry_on"] = patterns + [sel]
+            container["retry_on"] = patterns + [sel]
             changed = True
         elif act == "custom":
             raw = interactive.ask("New pattern")
             raw = "" if raw is interactive.BACK else str(raw).strip()
             if raw and raw not in patterns:
-                cfg["retry_on"] = patterns + [raw]
+                container["retry_on"] = patterns + [raw]
                 changed = True
         elif act == "remove":
             if not patterns:
@@ -1050,8 +1138,33 @@ def _edit_patterns(cfg) -> bool:
             sel = interactive.pick("Remove which pattern?", patterns)
             if sel is interactive.BACK:
                 continue
-            cfg["retry_on"] = [p for p in patterns if p != sel]
+            container["retry_on"] = [p for p in patterns if p != sel]
             changed = True
+
+
+def _edit_notify_events(cfg) -> bool:
+    """Toggle which run outcomes fire a notification (all channels). Persists the
+    enabled list as `notify_events`; when all are on (the default) the key is
+    removed so configs stay clean. Returns True if it changed."""
+    before = _enabled_events(cfg)
+    enabled = set(before)
+    while True:
+        rows = [(k, f"[{'x' if k in enabled else ' '}] {lbl}")
+                for k, lbl in _NOTIFY_EVENTS]
+        rows.append(("done", "Done"))
+        sel = interactive.pick("Notify on which events?", rows,
+                               to_str=lambda r: r[1], allow_back=False)[0]
+        if sel == "done":
+            break
+        enabled.discard(sel) if sel in enabled else enabled.add(sel)
+    if enabled == before:
+        return False
+    if enabled == set(_NOTIFY_EVENT_KEYS):
+        cfg.pop("notify_events", None)          # all-on is the implicit default
+    else:
+        # persist in canonical order
+        cfg["notify_events"] = [k for k in _NOTIFY_EVENT_KEYS if k in enabled]
+    return True
 
 
 def _resolve_repo_key(args, cfg):
@@ -1098,12 +1211,20 @@ def _edit_repo(cfg, key) -> bool:
     while True:
         r = config.get_repo(cfg, key)
         rows = [(fk, f"{label:<18}{r.get(fk) or '(unset)'}") for fk, label in fields]
+        n_over = len(r.get("retry_on") or [])
+        retry_desc = f"{n_over} pattern(s), overrides default" if n_over else "using default"
+        rows.append(("__retry__", f"{'Retry patterns':<18}{retry_desc}  ›"))
         rows.append(("__vars__", f"Variables ({len(r.get('variables') or {})})  ›"))
         rows.append(("done", "Done"))
         sel = interactive.pick(f"Repo: {key}", rows,
                                to_str=lambda x: x[1], allow_back=False)[0]
         if sel == "done":
             return changed
+        if sel == "__retry__":
+            # Editing the repo dict's own retry_on = an override of the default set.
+            if _edit_patterns(config.ensure_repo(cfg, key), f"{key} retry override"):
+                changed = True
+            continue
         if sel == "__vars__":
             changed = _edit_variables(cfg, key) or changed
             continue
@@ -1323,9 +1444,14 @@ def _edit_phone_push(cfg) -> bool:
 
 def _edit_push_provider(cfg, provider) -> bool:
     """Set / clear one provider's URL, then offer a test send so the user can
-    confirm their phone before relying on it. ntfy can GENERATE a random topic
-    (a user-picked name is easy to guess); other providers paste a URL from the
-    destination's own UI (e.g. a Google Chat incoming-webhook)."""
+    confirm their phone before relying on it.
+
+    The interaction adapts to the provider: ntfy can GENERATE a random topic (a
+    user-picked name is easy to guess), so it offers a real choice — generate vs
+    paste. Providers that can't generate (e.g. Google Chat, where you must paste
+    a webhook from the destination's own UI) skip the menu entirely when nothing
+    is set yet and just prompt for the URL; once set, the only real choices are
+    change-it or turn-it-off."""
     key, label = provider["config_key"], provider["label"]
     cur = cfg.get(key) or ""
     if provider["id"] == "gchat":
@@ -1333,36 +1459,63 @@ def _edit_push_provider(cfg, provider) -> bool:
         print('a "space of one" reaches only you. In Google Chat create a space')
         print("(invite nobody), then Apps & integrations → Manage webhooks → Add,")
         print("and paste the URL below. Keep it private — it is the credential.")
+    elif provider["id"] == "slack":
+        print("Slack phone push posts to an incoming-webhook URL. For personal push,")
+        print("point it at a private channel with only you in it. Create the webhook")
+        print("at api.slack.com/apps → your app → Incoming Webhooks → Add, then paste")
+        print("the URL below. Keep it private — it is the credential.")
     else:
         print(f"{label} phone push sends the finish notification to your phone —")
         print("it fires even with no terminal watching.")
-    rows = []
-    if provider["can_generate"]:
-        rows.append(("gen", "Generate a random ntfy.sh topic (recommended)"))
-    rows.append(("manual", f"Enter the {label} URL myself"))
-    if cur:
-        rows.append(("off", f"Turn {label} off"))
-    sel = interactive.pick(label, rows, to_str=lambda x: x[1])
-    if sel is interactive.BACK:
-        return False
-    changed = False
-    if sel[0] == "gen":
-        cfg[key] = _random_ntfy_url()
-        changed = True
-        print(f"{interactive.green('✓')} generated: {cfg[key]}")
-        print("  → open the ntfy app on your phone and subscribe to that topic")
-        print("    (copy the part after the last '/'). Keep this URL private.")
-    elif sel[0] == "manual":
+
+    def _prompt_url() -> bool:
         raw = interactive.ask(f"{label} URL", default=cur or None)
-        if raw is not interactive.BACK:
-            raw = str(raw).strip()
-            if raw and raw != cur:
-                cfg[key] = raw
-                changed = True
-    elif sel[0] == "off":
+        if raw is interactive.BACK:
+            return False
+        raw = str(raw).strip()
+        if raw and raw != cur:
+            cfg[key] = raw
+            return True
+        return False
+
+    def _turn_off() -> bool:
         cfg.pop(key, None)
-        changed = True
         print(f"{interactive.green('✓')} {label} turned off")
+        return True
+
+    changed = False
+    if provider["can_generate"]:
+        # A genuine choice: repipe can mint a topic, or you paste your own.
+        rows = [("gen", "Generate a random ntfy.sh topic (recommended)"),
+                ("manual", f"Enter the {label} URL myself")]
+        if cur:
+            rows.append(("off", f"Turn {label} off"))
+        sel = interactive.pick(label, rows, to_str=lambda x: x[1])
+        if sel is interactive.BACK:
+            return False
+        if sel[0] == "gen":
+            cfg[key] = _random_ntfy_url()
+            changed = True
+            print(f"{interactive.green('✓')} generated: {cfg[key]}")
+            print("  → open the ntfy app on your phone and subscribe to that topic")
+            print("    (copy the part after the last '/'). Keep this URL private.")
+        elif sel[0] == "manual":
+            changed = _prompt_url()
+        elif sel[0] == "off":
+            changed = _turn_off()
+    elif not cur:
+        # No generate option and nothing set — asking "how?" is pointless; just
+        # prompt for the URL directly.
+        changed = _prompt_url()
+    else:
+        # Already configured, can't generate — the only real choices are
+        # change-it or turn-it-off.
+        rows = [("manual", "Change the URL"), ("off", f"Turn {label} off")]
+        sel = interactive.pick(label, rows, to_str=lambda x: x[1])
+        if sel is interactive.BACK:
+            return False
+        changed = _prompt_url() if sel[0] == "manual" else _turn_off()
+
     url = cfg.get(key)
     if url and interactive.confirm("Send a test push now?", default=True):
         getattr(notify_mod, provider["send"])(
@@ -1376,88 +1529,102 @@ def _edit_push_provider(cfg, provider) -> bool:
 def cmd_config(args) -> int:
     cfg = config.load()
     if getattr(args, "show", False):
-        return _config_show(cfg)
+        return _config_show(cfg, reveal=getattr(args, "reveal", False))
 
     d = _CONFIG_DEFAULTS
     dirty = False
-    while True:
-        onoff = lambda b: "on" if b else "off"
-        rows = [
-            ("patterns", f"Retry patterns ({len(cfg.get('retry_on') or [])})  ›"),
-            ("max_retries", f"Max retries       {cfg.get('max_retries', d['max_retries'])}"),
-            ("match", f"Match mode        {cfg.get('match', d['match'])}"),
-            ("poll_interval", f"Poll interval     {cfg.get('poll_interval', d['poll_interval'])}s"),
-            ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
-            ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
-            ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
-            ("phone_push", f"Phone push        {_phone_push_summary(cfg)}  ›"),
-            ("user_email", f"Email (autofill)  {cfg.get('user_email') or '(unset)'}"),
-            ("repo", "Repo settings     ›"),
-            ("save", "Save & exit"),
-            ("quit", "Quit (discard)"),
-        ]
-        key = interactive.pick("repipe config", rows,
-                               to_str=lambda r: r[1], allow_back=False)[0]
+    try:
+        while True:
+            onoff = lambda b: "on" if b else "off"
+            unsaved = interactive.yellow("  • unsaved") if dirty else ""
+            rows = [
+                ("patterns", f"Default retry patterns ({len(cfg.get('retry_on') or [])})  ›"),
+                ("max_retries", f"Max retries       {cfg.get('max_retries', d['max_retries'])}"),
+                ("match", f"Match mode        {cfg.get('match', d['match'])}"),
+                ("poll_interval", f"Poll interval     {cfg.get('poll_interval', d['poll_interval'])}s"),
+                ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
+                ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
+                ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
+                ("notify_events", f"Notify on events  {_notify_events_summary(cfg)}  ›"),
+                ("phone_push", f"Phone push        {_phone_push_summary(cfg)}  ›"),
+                ("user_email", f"Email (autofill)  {cfg.get('user_email') or '(unset)'}"),
+                ("repo", "Repo settings     ›"),
+                ("save", "Save & exit"),
+                ("quit", "Quit (discard)"),
+            ]
+            key = interactive.pick(f"repipe config{unsaved}", rows,
+                                   to_str=lambda r: r[1], allow_back=False)[0]
 
-        if key == "save":
+            if key == "save":
+                path = config.save(cfg)
+                print(f"{interactive.green('✓')} saved {path}")
+                return EXIT_OK
+            if key == "quit":
+                if dirty and not interactive.confirm("Discard changes?", default=False):
+                    continue
+                return EXIT_OK
+            if key == "patterns":
+                dirty = _edit_patterns(cfg, "Default retry patterns") or dirty
+            elif key == "max_retries":
+                v = _ask_int("Max retries", cfg.get("max_retries", d["max_retries"]), 0)
+                if v != cfg.get("max_retries", d["max_retries"]):
+                    cfg["max_retries"] = v
+                    dirty = True
+            elif key == "match":
+                cur = cfg.get("match", d["match"])
+                modes = ["substring", "regex"]
+                sel = interactive.pick("Match mode", modes,
+                                       default_idx=modes.index(cur) if cur in modes else 0)
+                if sel is not interactive.BACK and sel != cur:
+                    cfg["match"] = sel
+                    dirty = True
+            elif key in ("poll_interval", "timeout"):
+                v = _ask_int(key.replace("_", " ").capitalize(), cfg.get(key, d[key]), 1)
+                if v != cfg.get(key, d[key]):
+                    cfg[key] = v
+                    dirty = True
+            elif key in ("notify", "notify_steps"):
+                cur = cfg.get(key, d[key])
+                prompt = "Enable notifications?" if key == "notify" else "Notify on each step?"
+                new = interactive.confirm(prompt, default=cur)
+                if new != cur:
+                    cfg[key] = new
+                    dirty = True
+            elif key == "notify_events":
+                dirty = _edit_notify_events(cfg) or dirty
+            elif key == "phone_push":
+                dirty = _edit_phone_push(cfg) or dirty
+            elif key == "user_email":
+                print(interactive.dim(
+                    "  Used to autofill pipeline variables (autofill = \"git_email\") "
+                    "and shown here."))
+                print(interactive.dim(
+                    "  This is NOT your login email — to change that, run `repipe login`."))
+                raw = interactive.ask("Autofill email",
+                                      default=cfg.get("user_email") or None)
+                if raw is not interactive.BACK:
+                    raw = str(raw).strip()
+                    if raw != (cfg.get("user_email") or ""):
+                        cfg["user_email"] = raw
+                        dirty = True
+                        login_email = _login_email()
+                        if raw and login_email and raw != login_email:
+                            print(interactive.dim(
+                                f"  note: your Bitbucket login email ({login_email}) is "
+                                "unchanged — run `repipe login` to change that."))
+            elif key == "repo":
+                rkey = _resolve_repo_key(args, cfg)
+                if rkey and _edit_repo(cfg, rkey):
+                    dirty = True
+    except KeyboardInterrupt:
+        # ^C must not silently drop edits. The top-level handler would just abort;
+        # here we give the same save/discard choice the "Quit" item offers.
+        if dirty and interactive.confirm("\nSave changes before exiting?", default=True):
             path = config.save(cfg)
             print(f"{interactive.green('✓')} saved {path}")
-            return EXIT_OK
-        if key == "quit":
-            if dirty and not interactive.confirm("Discard changes?", default=False):
-                continue
-            return EXIT_OK
-        if key == "patterns":
-            dirty = _edit_patterns(cfg) or dirty
-        elif key == "max_retries":
-            v = _ask_int("Max retries", cfg.get("max_retries", d["max_retries"]), 0)
-            if v != cfg.get("max_retries", d["max_retries"]):
-                cfg["max_retries"] = v
-                dirty = True
-        elif key == "match":
-            cur = cfg.get("match", d["match"])
-            modes = ["substring", "regex"]
-            sel = interactive.pick("Match mode", modes,
-                                   default_idx=modes.index(cur) if cur in modes else 0)
-            if sel is not interactive.BACK and sel != cur:
-                cfg["match"] = sel
-                dirty = True
-        elif key in ("poll_interval", "timeout"):
-            v = _ask_int(key.replace("_", " ").capitalize(), cfg.get(key, d[key]), 1)
-            if v != cfg.get(key, d[key]):
-                cfg[key] = v
-                dirty = True
-        elif key in ("notify", "notify_steps"):
-            cur = cfg.get(key, d[key])
-            prompt = "Enable notifications?" if key == "notify" else "Notify on each step?"
-            new = interactive.confirm(prompt, default=cur)
-            if new != cur:
-                cfg[key] = new
-                dirty = True
-        elif key == "phone_push":
-            dirty = _edit_phone_push(cfg) or dirty
-        elif key == "user_email":
-            print(interactive.dim(
-                "  Used to autofill pipeline variables (autofill = \"git_email\") "
-                "and shown here."))
-            print(interactive.dim(
-                "  This is NOT your login email — to change that, run `repipe login`."))
-            raw = interactive.ask("Autofill email",
-                                  default=cfg.get("user_email") or None)
-            if raw is not interactive.BACK:
-                raw = str(raw).strip()
-                if raw != (cfg.get("user_email") or ""):
-                    cfg["user_email"] = raw
-                    dirty = True
-                    login_email = _login_email()
-                    if raw and login_email and raw != login_email:
-                        print(interactive.dim(
-                            f"  note: your Bitbucket login email ({login_email}) is "
-                            "unchanged — run `repipe login` to change that."))
-        elif key == "repo":
-            rkey = _resolve_repo_key(args, cfg)
-            if rkey and _edit_repo(cfg, rkey):
-                dirty = True
+        else:
+            print("\n(exited — no changes saved)")
+        return EXIT_OK
 
 
 def _ask_token(label) -> str:
@@ -1838,6 +2005,8 @@ def build_parser() -> argparse.ArgumentParser:
                               help="view / edit repipe settings (interactive)")
     p_config.add_argument("--show", action="store_true",
                           help="print current global settings and exit (no TTY needed)")
+    p_config.add_argument("--reveal", action="store_true",
+                          help="with --show, print full webhook URLs instead of masking them")
 
     return parser
 

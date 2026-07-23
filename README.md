@@ -150,7 +150,7 @@ Bad or missing variables are caught locally in ~1s (before any API call), using 
 
 ### Editing settings
 
-`repipe config` opens an arrow-key menu (same UX as the interactive run flow) to view and change settings without hand-editing TOML. The top level covers the globals: retry patterns (add from suggestions, add custom, remove), max retries, match mode, poll interval, timeout, desktop notifications, per-step notifications, and your email. **Repo settings ›** edits the per-repo basics — provider, QA branch prefix, prod branch prefix — for the repo it detects from the working tree (or, if you're not in one, a repo you pick from those already configured). Under it, **Variables ›** is a full editor for the per-repo input schema: pick a variable (or add one) and set its `enum` (add/remove allowed values), `default`, `required`, `pattern`, `autofill`, `remember`, `no_spaces_unless`, and `hint` — the same table you'd otherwise hand-write. `repipe config --show` prints the current effective globals and exits (no terminal needed, so it works over a pipe / in CI).
+`repipe config` opens an arrow-key menu (same UX as the interactive run flow) to view and change settings without hand-editing TOML. The top level covers the globals: default retry patterns (add from suggestions, add custom, remove), max retries, match mode, poll interval, timeout, desktop notifications, per-step notifications, which events notify you, phone-push providers, and your email. **Repo settings ›** edits the per-repo basics — provider, QA branch prefix, prod branch prefix — for the repo it detects from the working tree (or, if you're not in one, a repo you pick from those already configured). Under it, **Variables ›** is a full editor for the per-repo input schema: pick a variable (or add one) and set its `enum` (add/remove allowed values), `default`, `required`, `pattern`, `autofill`, `remember`, `no_spaces_unless`, and `hint` — the same table you'd otherwise hand-write. `repipe config --show` prints the current effective globals and exits (no terminal needed, so it works over a pipe / in CI); webhook URLs are **masked** (they carry credentials) — add `--reveal` to print them in full.
 
 ### Auto-retry (opt-in — you define the patterns)
 
@@ -159,6 +159,8 @@ repipe ships **no** retry patterns and retries **nothing** by default. You decid
 ```bash
 repipe suggestions          # a starter list of common transient errors to copy
 ```
+
+**Default + per-repo patterns.** The top-level `retry_on` is the **default** set, used by every repo. A repo whose transient failures differ can set its own `retry_on` under `[repos."ws/repo"]` (edit it via `repipe config → Repo settings → Retry patterns`); when present it **fully replaces** the default for that repo (not merged). Precedence on any run: an explicit `--retry-on` beats a per-repo override beats the default.
 
 Matching is case-insensitive substring by default (`--match regex` for regex). Exit codes: `0` success/halted-at-gate, `1` failed-no-match, `2` retries exhausted, `3` config/auth, `4` timeout.
 
@@ -188,6 +190,7 @@ Providers are pluggable — configure any combination and **every** enabled one 
 | --- | --- | --- |
 | **ntfy** | zero-setup personal push | repipe generates a random topic; subscribe in the ntfy app |
 | **Google Chat** | a personal feed inside a Google-Chat org | paste an incoming-webhook URL from a private space |
+| **Slack** | a personal feed inside a Slack org | paste an incoming-webhook URL pointed at a private channel |
 
 ```bash
 repipe config                          # → "Phone push ›" → pick a provider → send a test
@@ -204,12 +207,24 @@ repipe run -p deploy-qa --no-phone-notify   # skip the phone for this run
 1. **Create the space.** In Google Chat: **+ New space → Create a space**, name it (e.g. `repipe alerts`), and **invite nobody**.
 2. **Add a webhook.** Open the space's menu (click its name) → **Apps & integrations → Manage webhooks → Add**, name it (e.g. `repipe`), and **Save**.
 3. **Copy the webhook URL** — `https://chat.googleapis.com/v1/spaces/AAAA…/messages?key=…&token=…`.
-4. **Tell repipe:** `repipe config → Phone push → Google Chat → Enter the URL myself`, paste it, and answer **yes** to *Send a test push now?* A `repipe · test` card should appear in your space.
+4. **Tell repipe:** `repipe config → Phone push → Google Chat`, paste the URL at the prompt, and answer **yes** to *Send a test push now?* A `repipe · test` card should appear in your space.
 5. **Get it on your phone:** install the **Google Chat** app (or use the Gmail Chat tab), signed into the same account, with notifications enabled and the space un-muted.
 
 It lands in config as `notify_gchat_url = "https://chat.googleapis.com/v1/spaces/…"`. On a real run you get a card — header `repipe · <pipeline>`, the status line (`✓ #158 succeeded` / `✗ failed` / `↻ retrying`), and an **Open pipeline** button.
 
 > The webhook URL *is* the credential (its `key`+`token` query params) — keep it private, like the ntfy topic. Your org admin can disable incoming webhooks entirely (Admin console → Apps → Google Chat); if **Manage webhooks** isn't there, that's why, and there's no repipe-side workaround. Like every notification path, a failed push never affects the run's outcome or exit code.
+
+**Slack (personal push)** — Slack incoming webhooks post to a single channel, so the personal pattern is a **channel of one**: a private channel only you are in.
+
+1. **Create a private channel** (e.g. `repipe-alerts`), just you.
+2. At [api.slack.com/apps](https://api.slack.com/apps) → your app → **Incoming Webhooks** → enable → **Add New Webhook to Workspace**, pick that channel, and copy the URL (`https://hooks.slack.com/services/…`).
+3. `repipe config → Phone push → Slack`, paste the URL, send a test. You get a Block Kit message (title, status line, **Open pipeline** button) and a phone push via the Slack app.
+
+It lands in config as `notify_slack_url`. Same rule: the webhook URL is the credential — keep it private.
+
+#### Choosing which events notify you
+
+By default every outcome pings you. To cut the noise, `repipe config → Notify on events` toggles **success / failure / timeout / paused / retry** independently (applies to **all** channels — desktop and every push provider). E.g. leave only *failure* and *timeout* on to be pinged only when something needs you. Stored as `notify_events` (absent = all on).
 
 ## Configuration
 

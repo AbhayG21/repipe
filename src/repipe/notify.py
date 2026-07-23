@@ -138,8 +138,12 @@ def push_gchat(url, title, message, click="", **_):
 
     Formats as a cardsV2 message — a header with the title, the status line as
     decorated text, and (when `click` is set) a button that opens the pipeline run.
-    Unlike ntfy there is no topic/priority/tags/token machinery: the webhook URL
-    already carries its own `key`+`token` credential, so we POST it verbatim.
+    A top-level `text` summary is sent alongside the card: Google Chat builds the
+    phone/desktop notification PREVIEW from `text`, so without it the banner just
+    reads "…sent a notification" and you'd have to open the message to see what
+    happened. Unlike ntfy there is no topic/priority/tags/token machinery: the
+    webhook URL already carries its own `key`+`token` credential, so we POST it
+    verbatim.
 
     Ignores extra keyword args (priority/tags/token) so the dispatch loop can call
     every provider's sender with one uniform argument set.
@@ -153,13 +157,57 @@ def push_gchat(url, title, message, click="", **_):
                 {"text": "Open pipeline",
                  "onClick": {"openLink": {"url": str(click)}}},
             ]}})
-        payload = {"cardsV2": [{
-            "cardId": "repipe",
-            "card": {
-                "header": {"title": str(title or "repipe")},
-                "sections": [{"widgets": widgets}],
-            },
-        }]}
+        payload = {
+            # Drives the notification preview (card-only → "sent a notification").
+            "text": f"{title} — {message}" if title else str(message),
+            "cardsV2": [{
+                "cardId": "repipe",
+                "card": {
+                    "header": {"title": str(title or "repipe")},
+                    "sections": [{"widgets": widgets}],
+                },
+            }],
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json; charset=UTF-8"},
+        )
+        urllib.request.urlopen(req, timeout=5).close()
+    except Exception:
+        pass  # best-effort — never surface to the loop
+
+
+def push_slack(url, title, message, click="", **_):
+    """POST a notification to a Slack incoming-webhook URL, best-effort. Never
+    raises — a failed push is swallowed exactly like `push`, so it can't affect
+    the watch loop or exit code.
+
+    Slack incoming webhooks post to a single channel; for personal push, point it
+    at a private channel with only you in it (the Slack equivalent of Google
+    Chat's "space of one").
+
+    Formats as Block Kit — a section with the bold title and the status line, and
+    (when `click` is set) an actions block with a button that opens the pipeline
+    run. Like Google Chat, the webhook URL is the credential, so we POST it as-is
+    (no priority/tags/token machinery). Ignores extra keyword args so the dispatch
+    loop can call every provider's sender with one uniform argument set.
+    """
+    if not url:
+        return
+    try:
+        text = f"*{title or 'repipe'}*\n{message}"
+        blocks = [{"type": "section",
+                   "text": {"type": "mrkdwn", "text": text}}]
+        if click:
+            blocks.append({"type": "actions", "elements": [
+                {"type": "button",
+                 "text": {"type": "plain_text", "text": "Open pipeline"},
+                 "url": str(click)},
+            ]})
+        # `text` is a required top-level fallback (notifications / old clients).
+        payload = {"text": f"{title or 'repipe'} — {message}", "blocks": blocks}
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -182,4 +230,6 @@ PUSH_PROVIDERS = [
      "can_generate": True, "send": "push"},
     {"id": "gchat", "label": "Google Chat", "config_key": "notify_gchat_url",
      "can_generate": False, "send": "push_gchat"},
+    {"id": "slack", "label": "Slack", "config_key": "notify_slack_url",
+     "can_generate": False, "send": "push_slack"},
 ]

@@ -29,6 +29,12 @@ max_retries = 2
 # default — it adds one API call per poll. Same as passing --notify-steps.
 # notify_steps = false
 
+# Which run OUTCOMES notify you (all channels — desktop + every push provider).
+# Omit this key for the default (all events). List a subset to mute the rest,
+# e.g. only get pinged on failures/timeouts. Valid: success, failed, timeout,
+# halted (paused at a manual gate), retry.
+# notify_events = ["failed", "timeout"]
+
 # Push the finish notification to your PHONE via ntfy (ntfy.sh or self-hosted).
 # Unlike the desktop notification above, this fires even with NO terminal — the
 # point is to run repipe on an always-on box, close your laptop, and still get
@@ -42,19 +48,24 @@ max_retries = 2
 
 # Or push to Google Chat — personal push via a private "space of one" incoming
 # webhook (create a space, invite nobody, Apps & integrations → Manage webhooks).
-# Configure both keys and BOTH fire. The webhook URL IS the credential (its
-# key+token query params) — keep it private. Unset => no Google Chat push.
+# Configure any combination and ALL fire. The webhook URL IS the credential (its
+# key+token query params) — keep it private. Unset => that provider is off.
 # notify_gchat_url = "https://chat.googleapis.com/v1/spaces/AAAA/messages?key=...&token=..."
+
+# Or Slack — an incoming-webhook URL. For personal push, point it at a private
+# channel with only you in it. Webhook URL is the credential; keep it private.
+# notify_slack_url = "https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX"
 
 # Watch loop tuning (read by the interactive flow and `rerun`; `run` takes these
 # as --poll-interval / --timeout flags instead). Seconds.
 # poll_interval = 20
 # timeout = 3600
 
-# Retry patterns — YOU choose these. repipe applies NONE by default; it only
-# re-triggers a failed run whose log matches a pattern you list here (or pass
-# with --retry-on). No pattern configured => no retries.
-# Run `repipe suggestions` for a starter list of common transient errors to copy.
+# DEFAULT retry patterns — YOU choose these. repipe applies NONE by default; it
+# only re-triggers a failed run whose log matches a pattern you list here (or pass
+# with --retry-on). No pattern configured => no retries. A repo can OVERRIDE this
+# whole set with its own `retry_on` (see the per-repo section below); an explicit
+# --retry-on beats both. Run `repipe suggestions` for a starter list to copy.
 retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 
 # ---------------------------------------------------------------------------
@@ -67,6 +78,9 @@ retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 provider           = "bitbucket"
 qa_branch_prefix   = "qa-release"  # used to pick the newest QA release branch
 prod_branch_prefix = "prod-release"
+# Optional: this repo's OWN retry patterns. When present they fully REPLACE the
+# default retry_on above for this repo (not merged). Omit to use the default.
+# retry_on = ["flaky integration suite", "error pulling image"]
 
 # A GitHub Actions repo looks the same — repipe reads workflow_dispatch inputs
 # from .github/workflows/*.yml, so `enum`/`default` often come for free.

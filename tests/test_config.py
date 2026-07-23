@@ -43,6 +43,20 @@ class ConfigRoundTrip(unittest.TestCase):
         self.assertEqual(reparsed["max_retries"], 3)
 
     @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_notify_events_round_trips(self):
+        cfg = {"notify_events": ["failed", "timeout"]}
+        reparsed = tomllib.loads(config.dumps(cfg))
+        self.assertEqual(reparsed["notify_events"], ["failed", "timeout"])
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_per_repo_retry_on_round_trips(self):
+        cfg = {"repos": {"ws/repo": {"provider": "github",
+                                     "retry_on": ["flaky test", "oom"]}}}
+        reparsed = tomllib.loads(config.dumps(cfg))
+        self.assertEqual(reparsed["repos"]["ws/repo"]["retry_on"],
+                         ["flaky test", "oom"])
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
     def test_emitter_roundtrips_poll_and_timeout(self):
         cfg = {"poll_interval": 45, "timeout": 900}
         reparsed = tomllib.loads(config.dumps(cfg))

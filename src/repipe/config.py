@@ -80,7 +80,8 @@ def dumps(cfg: dict) -> str:
     push_keys = tuple(p["config_key"] for p in notify.PUSH_PROVIDERS)
     lines = []
     for k in ("user_email", "match", "max_retries",
-              "poll_interval", "timeout", "notify", "notify_steps") + push_keys:
+              "poll_interval", "timeout", "notify", "notify_steps",
+              "notify_events") + push_keys:
         if k in cfg:
             lines.append(f"{k} = {_val(cfg[k])}")
     if "retry_on" in cfg:
@@ -97,6 +98,8 @@ def dumps(cfg: dict) -> str:
         for k in ("provider", "qa_branch_prefix", "prod_branch_prefix"):
             if k in r:
                 lines.append(f"{k} = {_val(r[k])}")
+        if r.get("retry_on"):  # per-repo override of the default retry patterns
+            lines.append(f"retry_on = {_val(r['retry_on'])}")
         # Per-variable schema (hand-edited). Re-emitted so a tool-triggered
         # save() never drops the user's constraints.
         for vname, entry in (r.get("variables") or {}).items():

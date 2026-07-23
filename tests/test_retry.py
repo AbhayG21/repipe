@@ -2,7 +2,27 @@
 
 import unittest
 
+from repipe import cli
 from repipe.retry import build_patterns, first_match
+
+
+class ResolveRetry(unittest.TestCase):
+    """_resolve_retry precedence: explicit --retry-on > per-repo override > default."""
+
+    CFG = {"retry_on": ["default"], "repos": {"w/r": {"retry_on": ["repo-only"]}}}
+
+    def test_explicit_cli_wins(self):
+        self.assertEqual(cli._resolve_retry(self.CFG, "w/r", ["cli"]), ["cli"])
+
+    def test_per_repo_overrides_default(self):
+        self.assertEqual(cli._resolve_retry(self.CFG, "w/r"), ["repo-only"])
+
+    def test_repo_without_override_falls_back_to_default(self):
+        cfg = {"retry_on": ["default"], "repos": {"w/r": {}}}
+        self.assertEqual(cli._resolve_retry(cfg, "w/r"), ["default"])
+
+    def test_no_config_is_none(self):
+        self.assertIsNone(cli._resolve_retry({}, "w/r"))
 
 
 class Retry(unittest.TestCase):

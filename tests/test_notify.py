@@ -307,6 +307,9 @@ class PushGchatTransport(unittest.TestCase):
         self.assertEqual(req.full_url, url)
         self.assertEqual(req.get_method(), "POST")
         self.assertEqual(cap["timeout"], 5)
+        # top-level text drives the notification preview (card-only = generic banner)
+        self.assertIn("repipe · deploy", body["text"])
+        self.assertIn("succeeded", body["text"])
         card = body["cardsV2"][0]["card"]
         self.assertEqual(card["header"]["title"], "repipe · deploy")
         widgets = card["sections"][0]["widgets"]
@@ -335,6 +338,53 @@ class PushGchatTransport(unittest.TestCase):
             notify_mod.push_gchat("https://chat.googleapis.com/x", "T", "M")
 
 
+class PushSlackTransport(unittest.TestCase):
+    """notify.push_slack builds a Block Kit webhook POST and never raises."""
+
+    def _capture(self, *a, **kw):
+        cap = {}
+
+        def fake(req, timeout=None):
+            cap["req"] = req
+            cap["timeout"] = timeout
+            cap["body"] = json.loads(req.data.decode("utf-8")) if req.data else {}
+            return Resp()
+
+        with mock.patch.object(notify_mod.urllib.request, "urlopen", side_effect=fake):
+            notify_mod.push_slack(*a, **kw)
+        return cap
+
+    def test_posts_blocks_with_button(self):
+        cap = self._capture("https://hooks.slack.com/services/T/B/xyz",
+                            "repipe · deploy", "✓ #158 succeeded",
+                            click="https://ci/158")
+        body = cap["body"]
+        self.assertEqual(cap["req"].full_url, "https://hooks.slack.com/services/T/B/xyz")
+        self.assertIn("blocks", body)
+        self.assertIn("repipe · deploy", body["blocks"][0]["text"]["text"])
+        btn = body["blocks"][1]["elements"][0]
+        self.assertEqual(btn["url"], "https://ci/158")
+        self.assertIn("text", body)  # top-level fallback present
+
+    def test_button_omitted_without_click(self):
+        body = self._capture("https://hooks.slack.com/x", "T", "M")["body"]
+        self.assertEqual(len(body["blocks"]), 1)  # section only, no actions
+
+    def test_ignores_ntfy_only_kwargs(self):
+        self._capture("https://hooks.slack.com/x", "T", "M",
+                      priority="high", tags="x", token="tk")  # must not raise
+
+    def test_no_url_is_a_noop(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen") as u:
+            notify_mod.push_slack("", "T", "M")
+        u.assert_not_called()
+
+    def test_network_error_is_swallowed(self):
+        with mock.patch.object(notify_mod.urllib.request, "urlopen",
+                               side_effect=OSError("boom")):
+            notify_mod.push_slack("https://hooks.slack.com/x", "T", "M")
+
+
 class MultiProviderDispatch(unittest.TestCase):
     """_notify_result fans a run event out to EVERY configured provider."""
 
@@ -344,32 +394,79 @@ class MultiProviderDispatch(unittest.TestCase):
                 mock.patch.object(cli, "_notify_token", return_value=None), \
                 mock.patch.object(cli.notify_mod, "notify"), \
                 mock.patch.object(cli.notify_mod, "push") as ntfy, \
-                mock.patch.object(cli.notify_mod, "push_gchat") as gchat:
+                mock.patch.object(cli.notify_mod, "push_gchat") as gchat, \
+                mock.patch.object(cli.notify_mod, "push_slack") as slack:
             cli._notify_result(TARGET, RUN, "success", 100,
                                _args(push_cfg=push_cfg, **over))
-        return ntfy, gchat
+        return ntfy, gchat, slack
 
-    def test_both_fire_when_both_configured(self):
-        ntfy, gchat = self._run({
+    def test_all_fire_when_all_configured(self):
+        ntfy, gchat, slack = self._run({
             "notify_url": "https://ntfy.sh/t",
             "notify_gchat_url": "https://chat.googleapis.com/x",
+            "notify_slack_url": "https://hooks.slack.com/x",
         })
         ntfy.assert_called_once()
         gchat.assert_called_once()
-        self.assertEqual(gchat.call_args.kwargs["click"], RUN.web_url)
+        slack.assert_called_once()
+        self.assertEqual(slack.call_args.kwargs["click"], RUN.web_url)
 
     def test_only_configured_provider_fires(self):
-        ntfy, gchat = self._run({"notify_gchat_url": "https://chat.googleapis.com/x"})
+        ntfy, gchat, slack = self._run({"notify_gchat_url": "https://chat.googleapis.com/x"})
         ntfy.assert_not_called()
         gchat.assert_called_once()
+        slack.assert_not_called()
 
     def test_phone_off_suppresses_all(self):
-        ntfy, gchat = self._run(
+        ntfy, gchat, slack = self._run(
             {"notify_url": "https://ntfy.sh/t",
              "notify_gchat_url": "https://chat.googleapis.com/x"},
             phone_notify=False)
         ntfy.assert_not_called()
         gchat.assert_not_called()
+        slack.assert_not_called()
+
+
+class EventFilter(unittest.TestCase):
+    """notify_events gates which outcomes notify, across every channel."""
+
+    def _fire(self, outcome, notify_events):
+        with mock.patch.object(cli.interactive, "live", return_value=True), \
+                mock.patch.object(cli, "_notify_token", return_value=None), \
+                mock.patch.object(cli.notify_mod, "notify") as local, \
+                mock.patch.object(cli.notify_mod, "push") as push:
+            cli._notify_result(TARGET, RUN, outcome, 100,
+                               _args(push_cfg={"notify_url": "https://ntfy.sh/t"},
+                                     phone_notify=True, notify_events=notify_events))
+        return local, push
+
+    def test_disabled_outcome_suppresses_all_channels(self):
+        local, push = self._fire("success", ["failed"])
+        local.assert_not_called()
+        push.assert_not_called()
+
+    def test_enabled_outcome_fires(self):
+        local, push = self._fire("failed", ["failed"])
+        local.assert_called_once()
+        push.assert_called_once()
+
+    def test_none_means_all_on(self):
+        local, push = self._fire("success", None)
+        local.assert_called_once()
+        push.assert_called_once()
+
+
+class MaskSecret(unittest.TestCase):
+    def test_masks_credential_keeps_host_and_tail(self):
+        u = "https://chat.googleapis.com/v1/spaces/AAA/messages?key=SECRETKEY&token=abcd1234"
+        m = cli._mask_secret(u)
+        self.assertTrue(m.startswith("https://chat.googleapis.com/"))
+        self.assertIn("…", m)
+        self.assertTrue(m.endswith("1234"))
+        self.assertNotIn("SECRETKEY", m)
+
+    def test_empty_is_empty(self):
+        self.assertEqual(cli._mask_secret(""), "")
 
 
 class NotifyUrlConfig(unittest.TestCase):
