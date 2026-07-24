@@ -132,6 +132,41 @@ class StepDiff(unittest.TestCase):
         n.assert_not_called()
 
 
+class DetachWatch(unittest.TestCase):
+    """cli detach plumbing — verified without ever forking a real process."""
+
+    def test_log_path_sanitizes_and_sits_under_config_logs(self):
+        path = cli._detach_log_path(TARGET, RUN)
+        # '#' is not filename-safe → replaced; file lives under <config>/logs/.
+        self.assertTrue(path.endswith("/logs/deploy-_158.log"), path)
+        self.assertEqual(cli.os.path.dirname(cli.os.path.dirname(path)),
+                         cli.config.config_dir())
+
+    def test_parent_returns_ok_and_never_watches_inline(self):
+        # Simulate the parent side of the double-fork: fork() reports a child pid,
+        # so _detach_and_watch must reap it and return without running the loop.
+        with mock.patch.object(cli.os, "fork", return_value=4321), \
+                mock.patch.object(cli.os, "waitpid", return_value=(4321, 0)), \
+                mock.patch.object(cli.os, "makedirs"), \
+                mock.patch.object(cli, "_watch_and_retry") as watch, \
+                mock.patch("builtins.print"):
+            code = cli._detach_and_watch(None, TARGET, "ref", [], None, RUN, _args())
+        self.assertEqual(code, cli.EXIT_OK)
+        watch.assert_not_called()
+
+    def test_falls_back_to_foreground_without_fork(self):
+        # A platform whose os has no fork() must degrade to a normal inline watch.
+        from types import SimpleNamespace
+        fakeos = SimpleNamespace()  # no `fork` attribute
+        with mock.patch.object(cli, "os", fakeos), \
+                mock.patch.object(cli, "_watch_and_retry",
+                                  return_value=cli.EXIT_OK) as watch, \
+                mock.patch("builtins.print"):
+            code = cli._detach_and_watch(None, TARGET, "ref", [], None, RUN, _args())
+        self.assertEqual(code, cli.EXIT_OK)
+        watch.assert_called_once()
+
+
 class WatchLoopStepPolling(unittest.TestCase):
     """The inner poll loop only calls get_steps when --notify-steps is on."""
 
