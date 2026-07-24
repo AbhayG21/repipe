@@ -238,7 +238,82 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
         print("\n(--no-wait: triggered only, not watching)")
         return EXIT_OK
 
+    if getattr(args, "detach", False):
+        return _detach_and_watch(provider, target, ref, variables, auth, run, args)
+
     return _watch_and_retry(provider, target, ref, variables, auth, run, args)
+
+
+def _detach_log_path(target, run) -> str:
+    """Per-run logfile the detached watcher writes to: ~/.config/repipe/logs/."""
+    tag = f"#{run.number}" if run.number is not None else str(run.id)
+    stem = "".join(c if (c.isalnum() or c in "-_.") else "_"
+                   for c in f"{target.name}-{tag}")
+    return os.path.join(config.config_dir(), "logs", f"{stem}.log")
+
+
+def _redirect_stdio_to(path):
+    """Point stdin at /dev/null and stdout+stderr at `path` (append). After this
+    the fds are no longer a TTY, so the watch loop auto-drops its spinner/colors
+    and the local desktop channel self-suppresses — gchat/ntfy still fire."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    null = os.open(os.devnull, os.O_RDONLY)
+    log = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(null, 0)
+    os.dup2(log, 1)
+    os.dup2(log, 2)
+    os.close(null)
+    if log > 2:
+        os.close(log)
+    # The redirected fds are a file, so Python block-buffers them — switch to
+    # line buffering so `tail -f` shows progress and os._exit() can't strand it.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+
+def _detach_and_watch(provider, target, ref, variables, auth, run, args) -> int:
+    """Double-fork the watch loop into a detached daemon so it survives the
+    terminal closing, then notifies (gchat/phone) when the run reaches a terminal
+    state. The parent returns immediately so the caller can persist state + exit."""
+    if not hasattr(os, "fork"):        # Windows: no detach — stay in foreground.
+        print(interactive.yellow(
+            "  (--detach is unsupported on this platform; watching in foreground)"))
+        return _watch_and_retry(provider, target, ref, variables, auth, run, args)
+
+    log_path = _detach_log_path(target, run)
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+
+    pid = os.fork()
+    if pid > 0:
+        os.waitpid(pid, 0)             # reap the intermediate child (exits at once)
+        n = f"#{run.number} " if run.number is not None else ""
+        print(interactive.cyan("⇲") + f" detached — watching {n}in the background.")
+        print("  you'll get a notification when it finishes"
+              + (" (build+push then a manual gate pauses it)"
+                 if target.env == "prod" else "") + ".")
+        print(interactive.dim(f"  logs: {log_path}  (tail -f to follow)"))
+        return EXIT_OK
+
+    # Intermediate child: detach from the controlling terminal, then fork the
+    # grandchild that actually does the work. setsid() makes the terminal's
+    # SIGHUP (sent when you close it) never reach the grandchild.
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+
+    _redirect_stdio_to(log_path)
+    try:
+        code = _watch_and_retry(provider, target, ref, variables, auth, run, args)
+    except BaseException:               # never leak a traceback into the void
+        code = EXIT_CONFIG
+    finally:
+        sys.stdout.flush()             # os._exit() skips buffer flushing
+        sys.stderr.flush()
+    os._exit(code)
 
 
 def _announce(pipeline, ref, run):
@@ -572,7 +647,7 @@ def _run_args_namespace(**overrides):
     """A Namespace with every field _finish_run/_watch_and_retry expects,
     for the interactive flow and rerun (which don't come from the run parser)."""
     d = dict(
-        dry_run=False, yes=False, no_wait=False, force=False,
+        dry_run=False, yes=False, no_wait=False, force=False, detach=False,
         retry_on=None, match="substring",
         max_retries=2, poll_interval=20, timeout=3600,
         notify=True, notify_steps=False,
@@ -740,11 +815,29 @@ def cmd_interactive(args) -> int:
             i += 1
 
     target, ref, variables = st["target"], st["ref"], st["variables"]
+    retry_on = _resolve_retry(cfg, repo_key)
+    max_retries = cfg.get("max_retries", 2)
+    # Prod auto-retry is off by default; offer an explicit opt-in (the
+    # interactive equivalent of `run --force`). Only ask when retry is
+    # actually configured, and never non-interactively (parity with --force).
+    force = False
+    detach = getattr(args, "detach", False)
+    if target.env == "prod" and not args.dry_run and not args.yes:
+        if retry_on or max_retries:
+            force = interactive.confirm(
+                "Auto-retry this PROD run on transient failures?", default=False)
+        # Prod deploys are long and often pause at a manual gate — the exact case
+        # where you walk away. Offer to keep watching (and notify) in the
+        # background so closing this terminal doesn't cost you the notification.
+        if not detach:
+            detach = interactive.confirm(
+                "Watch in the background? (notify even if you close this terminal)",
+                default=False)
     rargs = _run_args_namespace(
-        dry_run=args.dry_run, yes=args.yes,
+        dry_run=args.dry_run, yes=args.yes, force=force, detach=detach,
         match=cfg.get("match", "substring"),
-        max_retries=cfg.get("max_retries", 2),
-        retry_on=_resolve_retry(cfg, repo_key),
+        max_retries=max_retries,
+        retry_on=retry_on,
         poll_interval=cfg.get("poll_interval", 20),
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
@@ -1909,6 +2002,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true",
                         help="bare `repipe`: preview the interactive run, no API call")
     parser.add_argument("--yes", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("-d", "--detach", action="store_true",
+                        help="bare `repipe`: watch in the background, notify when done")
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--path", default=".",
@@ -1948,6 +2043,9 @@ def build_parser() -> argparse.ArgumentParser:
                        action="store_true", help="disable prompts (CI/scripting)")
     p_run.add_argument("--no-wait", action="store_true",
                        help="trigger only; don't poll or retry")
+    p_run.add_argument("-d", "--detach", action="store_true",
+                       help="watch in the background and notify when the run "
+                            "finishes, even if you close the terminal")
     p_run.add_argument("--retry-on", action="append", metavar="PATTERN",
                        help="extra retry pattern (repeatable; appends to built-ins)")
     p_run.add_argument("--match", choices=["substring", "regex"], default="substring",
