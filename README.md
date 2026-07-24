@@ -4,6 +4,11 @@
 
 <h1 align="center">repipe</h1>
 
+<p align="center">
+  <a href="https://github.com/AbhayG21/repipe/releases"><img src="https://img.shields.io/github/downloads/AbhayG21/repipe/total?label=downloads&color=brightgreen" alt="GitHub downloads"></a>
+  <a href="https://github.com/AbhayG21/repipe/releases/latest"><img src="https://img.shields.io/github/v/release/AbhayG21/repipe?label=release&color=blue" alt="Latest release"></a>
+</p>
+
 Trigger a CI pipeline on demand and **auto-retry it when it fails with a transient error** — from one word on the command line.
 
 - **Zero dependencies.** A single Python 3 stdlib script. No `pip`, no `jq`.
