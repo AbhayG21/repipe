@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📘 Docs & showcase
+    url: https://abhayg21.github.io/repipe/
+    about: Command reference, setup, and examples — check here before filing.
+  - name: 💬 Questions & general help
+    url: https://github.com/AbhayG21/repipe/discussions
+    about: Not a bug or feature request? Ask here.

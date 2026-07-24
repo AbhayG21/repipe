@@ -1,0 +1,96 @@
+name: 🐛 Bug report
+description: Something in repipe isn't working the way it should.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. Please fill in as much as you can —
+        the version and the exact command you ran are the two most useful things.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+      placeholder: |
+        When I ran `repipe run`, it ... but I expected it to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran, in order.
+      placeholder: |
+        1. `repipe init`
+        2. `repipe run deploy`
+        3. ...
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: repipe version
+      description: Output of `repipe version`.
+      placeholder: "e.g. 2.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: CI provider
+      description: Which adapter were you using?
+      options:
+        - Bitbucket Cloud
+        - GitHub Actions
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install repipe?
+      options:
+        - Homebrew (abhayg21/tap/repipe)
+        - curl install.sh
+        - Local clone / build.sh
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS & Python version
+      description: e.g. macOS 15.4 / Python 3.12. `python3 --version`.
+      placeholder: "macOS 15.4, Python 3.12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Paste any error output. Re-run with more verbosity if you can. **Redact any tokens or credentials.**
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this isn't a duplicate.
+          required: true
+        - label: I'm on the latest release (`repipe upgrade` / `brew upgrade repipe`), or noted above that I can't upgrade.
+          required: true
+        - label: I removed any tokens/credentials from the output above.
+          required: true
