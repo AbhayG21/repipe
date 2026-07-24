@@ -53,3 +53,53 @@ jobs:
               --title "repipe $GITHUB_REF_NAME" \
               --generate-notes
           fi
+
+  update-tap:
+    # Automates release-checklist step 10: bump the Homebrew formula's url +
+    # sha256 to this release. Downloads the PUBLISHED asset and hashes that, so
+    # the formula always points at the exact bytes users download.
+    #
+    # Requires a repo secret HOMEBREW_TAP_TOKEN: a fine-grained PAT with
+    # Contents: read/write on AbhayG21/homebrew-tap (the default github.token
+    # cannot push to another repo).
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the published asset and compute its sha256
+        id: asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "${{ github.repository }}" --pattern repipe --dir /tmp/asset
+          sha="$(sha256sum /tmp/asset/repipe | cut -d' ' -f1)"
+          url="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF_NAME}/repipe"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the Homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: AbhayG21/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Bump the formula and push if changed
+        run: |
+          set -euo pipefail
+          f=Formula/repipe.rb
+          [ -f "$f" ] || { echo "::error::$f not found in the tap"; exit 1; }
+          url='${{ steps.asset.outputs.url }}'
+          sha='${{ steps.asset.outputs.sha }}'
+          sed -i -E "s|^([[:space:]]*)url \".*\"|\1url \"$url\"|"       "$f"
+          sed -i -E "s|^([[:space:]]*)sha256 \".*\"|\1sha256 \"$sha\"|" "$f"
+          # Confirm the sed actually landed (guards against formula-format drift).
+          grep -qF "$url" "$f" && grep -qF "$sha" "$f" \
+            || { echo "::error::url/sha256 not present after edit — check the formula format"; exit 1; }
+          if git diff --quiet -- "$f"; then
+            echo "Formula already up to date — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "repipe ${GITHUB_REF_NAME}"
+          git push

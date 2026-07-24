@@ -21,10 +21,14 @@ without updating both is incomplete. Before pushing/tagging any release:
 9. Cut the GitHub Release + tag `vX.Y.Z`, attach the `repipe` asset, mark it Latest.
    (`install.sh` / `repipe upgrade` pull from **Releases**, not `/main` — so
    pushing to main alone does not distribute anything.)
-10. **Update the Homebrew tap** (`AbhayG21/homebrew-tap`, `Formula/repipe.rb`):
-   bump the `url` to the new `vX.Y.Z` and the `sha256` (`shasum -a 256 repipe`),
-   commit + push. That's how `brew upgrade repipe` gets the new version — the tap
-   does not auto-follow releases.
+10. **Homebrew tap** (`AbhayG21/homebrew-tap`, `Formula/repipe.rb`): now
+   **automated** by the `update-tap` job in `release.yml`, which bumps the `url`
+   + `sha256` to the published asset and pushes to the tap after the release.
+   Requires the repo secret `HOMEBREW_TAP_TOKEN` (a fine-grained PAT with
+   Contents: read/write on the tap). If that secret is missing or the job fails,
+   fall back to the manual bump: edit the `url` to the new `vX.Y.Z` and the
+   `sha256` (`shasum -a 256 repipe`), commit + push. The tap does not
+   auto-follow releases — one way or the other the formula must be bumped.
 
 ## Locked conventions
 

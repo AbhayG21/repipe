@@ -95,7 +95,7 @@ ok "repipe → $DEST"
 
 # 4. Sanity check the freshly installed script.
 if ! "$DEST" version >/dev/null 2>&1; then
-  err "Installed but `repipe version` did not run cleanly."
+  err "Installed but \`repipe version\` did not run cleanly."
   exit 1
 fi
 ok "$("$DEST" version)"

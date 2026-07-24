@@ -7,18 +7,38 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Exercise the whole supported range: 3.11 is the floor (tomllib), 3.13 the
+    # newest. Linux across all three; one macOS entry since that's the platform
+    # the release artifact is built on.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"     # 3.11+ so tomllib is exercised
+          python-version: ${{ matrix.python-version }}
 
       - name: Byte-compile all sources
         run: python3 -m py_compile src/repipe/*.py src/repipe/providers/*.py src/__main__.py
 
       - name: Unit tests (stdlib unittest, no deps, no secrets)
         run: python3 -m unittest discover -s tests -t . -v
+
+  shellcheck:
+    # install.sh is curl-piped into bash by users, so lint it (and build.sh)
+    # before it ships. shellcheck is preinstalled on ubuntu runners.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint shell scripts
+        run: shellcheck install.sh build.sh
 
   build-determinism:
     # The committed `repipe` zipapp must match a fresh reproducible build of src/,
