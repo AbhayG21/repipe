@@ -202,7 +202,19 @@ def _raise_http(e: urllib.error.HTTPError):
             EXIT_CONFIG,
         )
     if e.code == 404:
-        raise RepipeError("not found (404) — check the id / repo.", EXIT_CONFIG)
+        url = getattr(e, "url", "") or getattr(e, "filename", "")
+        if "bitbucket" in host:
+            hint = ("the branch/ref may not be pushed, or the repo path or "
+                    "token is wrong")
+        elif "github" in host:
+            hint = ("the workflow file or repo may not exist on that ref — and "
+                    "a private repo your token can't access also returns 404")
+        else:
+            hint = "check the id / repo / ref"
+        raise RepipeError(
+            f"not found (404) — {hint}." + (f"\n  URL: {url}" if url else ""),
+            EXIT_CONFIG,
+        )
     body = ""
     try:
         body = e.read().decode(errors="replace")[:400]

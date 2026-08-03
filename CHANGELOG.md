@@ -9,6 +9,13 @@ Release notes for each version are also on the
 [GitHub Releases](https://github.com/AbhayG21/repipe/releases) page.
 
 ## [Unreleased]
+- Pre-flight check: before triggering, verify the branch exists on the `origin`
+  remote and fail early with a clear message if it isn't pushed — instead of an
+  opaque 404 after the prod confirmation. Best-effort (bounded, never blocks when
+  the remote can't be reached).
+- Clearer 404 errors: the "not found" message now includes the failing URL and a
+  provider-specific hint (Bitbucket: branch not pushed / wrong repo or token;
+  GitHub: missing workflow/repo, or a private repo the token can't access).
 
 ## [2.3.0] - 2026-07-23
 - Slack push notifications.

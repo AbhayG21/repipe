@@ -22,7 +22,7 @@ from . import config
 from . import http
 from . import interactive
 from . import notify as notify_mod
-from .gitutil import detect_repo, branch_candidates, run_git
+from .gitutil import detect_repo, branch_candidates, run_git, remote_has_branch
 from .http import (
     get_auth, download_bytes, download_text, credentials_path, save_credentials,
 )
@@ -218,6 +218,21 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
         print(json.dumps(body, indent=2, ensure_ascii=False))
         print(f"\n({provider.TARGET_WORD} '{target.name}' [{target.env}] on branch '{ref}')")
         return EXIT_OK
+
+    # Pre-flight: the provider triggers against the branch as it exists on the
+    # REMOTE and reads the pipeline config from there — but we resolved the
+    # target from the LOCAL working copy. A branch that isn't pushed yields an
+    # opaque 404 *after* the prod gate. Catch that early with a clear message.
+    # Only act on a definitive "remote reachable, ref absent"; None = unknown =
+    # never block (see remote_has_branch).
+    cwd = getattr(args, "path", ".") or "."
+    if remote_has_branch(ref, cwd) is False:
+        raise RepipeError(
+            f"branch '{ref}' isn't on the 'origin' remote — {provider.NAME} "
+            f"triggers against the pushed branch and reads its pipeline config "
+            f"from there. Push it first (git push -u origin {ref}) and retry.",
+            EXIT_CONFIG,
+        )
 
     if not confirmed:
         _prod_gate(target, args)
