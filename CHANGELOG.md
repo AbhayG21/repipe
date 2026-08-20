@@ -9,6 +9,8 @@ Release notes for each version are also on the
 [GitHub Releases](https://github.com/AbhayG21/repipe/releases) page.
 
 ## [Unreleased]
+
+## [2.4.0] - 2026-08-20
 - The Branch and Pipeline pickers now suggest what you recently ran, per
   environment: recent branches are listed first and marked `suggested`, and the
   cursor starts on your last-run pipeline.
@@ -49,7 +51,8 @@ Release notes for each version are also on the
 
 <!-- Releases v1.6.0–v1.8.0 predate this changelog; see the GitHub Releases page. -->
 
-[Unreleased]: https://github.com/AbhayG21/repipe/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/AbhayG21/repipe/compare/v2.4.0...HEAD
+[2.4.0]: https://github.com/AbhayG21/repipe/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/AbhayG21/repipe/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/AbhayG21/repipe/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/AbhayG21/repipe/compare/v2.0.1...v2.1.0

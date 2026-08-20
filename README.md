@@ -165,6 +165,17 @@ repipe version | --help
 
 Run `repipe` with no arguments inside a repo. It discovers what it can and asks only for the rest: it lists the pipelines, infers QA vs prod from the name, offers the newest `qa-release*`/`prod-release*` branch (plus your current branch), and drives its variable prompts from the per-repo schema you configure — offering pickers for `enum` values, defaults, auto-filling variables from your git email, and remembering values you've entered before so it stops asking. Then it triggers, watches, and auto-retries.
 
+**It remembers what you actually run, per environment.** Because you re-run the same one or two pipelines against the same one or two release branches, repipe keeps a short history per env and puts it in front of you: the Branch step lists the branches you recently ran **for the env you picked** first, marked `suggested`, with the cursor on the most recent one; the Pipeline step marks the pipelines you've run before and starts the cursor on your last one. Pipelines stay in `bitbucket-pipelines.yml` order, so nothing shifts position between runs and a PROD entry can never climb to the top. Every trigger feeds this — `repipe`, `repipe run`, and `repipe rerun` alike.
+
+```
+Step 1 of 4                            Step 3 of 4
+    1) BUILD_QA     [qa]                 ❯ 1) qa-release-6  suggested
+    2) DEPLOY_QA    [qa]  suggested        2) qa-release-7  suggested
+  ❯ 3) MIGRATE_QA   [qa]                   3) main
+    4) DEPLOY_PROD  [prod]                 4) qa-release-8
+                                           5) enter manually…
+```
+
 ### Scriptable (CI / Claude)
 
 ```bash
@@ -180,7 +191,7 @@ Bad or missing variables are caught locally in ~1s (before any API call), using 
 
 ### Editing settings
 
-`repipe config` opens an arrow-key menu (same UX as the interactive run flow) to view and change settings without hand-editing TOML. The top level covers the globals: default retry patterns (add from suggestions, add custom, remove), max retries, match mode, poll interval, timeout, desktop notifications, per-step notifications, which events notify you, phone-push providers, and your email. **Repo settings ›** edits the per-repo basics — provider, QA branch prefix, prod branch prefix — for the repo it detects from the working tree (or, if you're not in one, a repo you pick from those already configured). Under it, **Variables ›** is a full editor for the per-repo input schema: pick a variable (or add one) and set its `enum` (add/remove allowed values), `default`, `required`, `pattern`, `autofill`, `remember`, `no_spaces_unless`, and `hint` — the same table you'd otherwise hand-write. `repipe config --show` prints the current effective globals and exits (no terminal needed, so it works over a pipe / in CI); webhook URLs are **masked** (they carry credentials) — add `--reveal` to print them in full.
+`repipe config` opens an arrow-key menu (same UX as the interactive run flow) to view and change settings without hand-editing TOML. The top level covers the globals: default retry patterns (add from suggestions, add custom, remove), max retries, match mode, poll interval, timeout, prod auto-retry, desktop notifications, per-step notifications, which events notify you, phone-push providers, and your email. **Repo settings ›** edits the per-repo basics — provider, QA branch prefix, prod branch prefix, and the prod auto-retry override (*use global* / *on* / *off*) — for the repo it detects from the working tree (or, if you're not in one, a repo you pick from those already configured). Under it, **Variables ›** is a full editor for the per-repo input schema: pick a variable (or add one) and set its `enum` (add/remove allowed values), `default`, `required`, `pattern`, `autofill`, `remember`, `no_spaces_unless`, and `hint` — the same table you'd otherwise hand-write. `repipe config --show` prints the current effective globals and exits (no terminal needed, so it works over a pipe / in CI); webhook URLs are **masked** (they carry credentials) — add `--reveal` to print them in full.
 
 ### Auto-retry (opt-in — you define the patterns)
 
@@ -196,7 +207,11 @@ Matching is case-insensitive substring by default (`--match regex` for regex). E
 
 ### Production safety
 
-Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation** (type the pipeline name, or `--yes` for CI), prod runs **do not auto-retry** unless you pass `--force`, and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
+Pipelines named `*_PROD`/`*CANARY*` are treated as production: triggering one **requires confirmation**, prod runs **do not auto-retry** by default, and because the API can't resume a manual deploy gate, repipe reports **HALTED** as a clean stop with a deep-link to approve the deploy in the UI — it never hangs or retries a paused run.
+
+**Confirming a prod trigger.** `repipe run` and `repipe rerun` ask you to type the pipeline name (or pass `--yes` for CI). The interactive flow doesn't: its own **Confirm** step is the confirmation, so you aren't asked to retype a name you just picked from a list — you still get the red `[prod]` badge, an explicit environment pick, and a printed summary before it fires.
+
+**Auto-retrying a prod run.** There's no shipped "safe" pattern set to fall back on, so prod refuses to auto-retry unless you say so. Per run that's `--force`; to stop passing it every time, set `prod_retry = true` in config (or per-repo under `[repos."ws/repo"]`) as standing consent — `repipe config → Prod auto-retry`, and **Repo settings › Prod auto-retry** for the per-repo override, where an explicit *off* opts one repo out of a global *on*. Precedence: `--force` beats the per-repo setting beats the global beats off. The interactive flow still asks before each prod run, but defaults to *yes* once the setting is on.
 
 ### Notifications
 
@@ -258,7 +273,7 @@ By default every outcome pings you. To cut the noise, `repipe config → Notify 
 
 ## Configuration
 
-Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries, notifications), per-repo defaults (provider, branch prefixes), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional.
+Copy [`config.example.toml`](./config.example.toml) to `~/.config/repipe/config.toml`. It holds **non-secret** global defaults (retry patterns, email, max retries, prod auto-retry, notifications), per-repo defaults (provider, branch prefixes, retry and prod-auto-retry overrides), and a per-repo variable schema so you can design your own pipeline inputs (enums, defaults, required flags, patterns, autofill, remembered values). Everything is optional. repipe also records a little state there as you use it — remembered variable values, your last run (for `rerun`), and the recent branches/pipelines per environment that drive the suggestions above.
 
 ## Project layout
 
