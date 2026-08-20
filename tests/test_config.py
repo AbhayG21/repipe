@@ -123,5 +123,103 @@ class ConfigRoundTrip(unittest.TestCase):
         self.assertEqual(r["last_run"]["vars"]["Env"], "a")
 
 
+class Recents(unittest.TestCase):
+    """Per-env MRU history driving the interactive picker suggestions."""
+
+    def test_records_per_env_most_recent_first(self):
+        cfg = {}
+        config.record_recent(cfg, "ws/repo", "qa", pipeline="DEPLOY", branch="qa-1")
+        config.record_recent(cfg, "ws/repo", "qa", pipeline="MIGRATE", branch="qa-2")
+        got = config.get_recent(cfg, "ws/repo", "qa")
+        self.assertEqual(got["pipelines"], ["MIGRATE", "DEPLOY"])
+        self.assertEqual(got["branches"], ["qa-2", "qa-1"])
+
+    def test_reused_value_moves_to_front_without_duplicating(self):
+        # MRU, unlike remember_value's append-only ordering.
+        cfg = {}
+        for b in ("qa-1", "qa-2", "qa-1"):
+            config.record_recent(cfg, "ws/repo", "qa", branch=b)
+        self.assertEqual(config.get_recent(cfg, "ws/repo", "qa")["branches"],
+                         ["qa-1", "qa-2"])
+
+    def test_caps_at_limit_dropping_oldest(self):
+        cfg = {}
+        for i in range(config._RECENT_LIMIT + 3):
+            config.record_recent(cfg, "ws/repo", "qa", branch=f"qa-{i}")
+        branches = config.get_recent(cfg, "ws/repo", "qa")["branches"]
+        self.assertEqual(len(branches), config._RECENT_LIMIT)
+        self.assertEqual(branches[0], f"qa-{config._RECENT_LIMIT + 2}")
+        self.assertNotIn("qa-0", branches)
+
+    def test_envs_are_independent(self):
+        cfg = {}
+        config.record_recent(cfg, "ws/repo", "qa", pipeline="DEPLOY_QA")
+        config.record_recent(cfg, "ws/repo", "prod", pipeline="DEPLOY_PROD")
+        self.assertEqual(config.get_recent(cfg, "ws/repo", "qa")["pipelines"],
+                         ["DEPLOY_QA"])
+        self.assertEqual(config.get_recent(cfg, "ws/repo", "prod")["pipelines"],
+                         ["DEPLOY_PROD"])
+
+    def test_unknown_repo_or_env_returns_empty_lists(self):
+        self.assertEqual(config.get_recent({}, "no/repo", "qa"),
+                         {"branches": [], "pipelines": []})
+        cfg = {}
+        config.record_recent(cfg, "ws/repo", "qa", branch="qa-1")
+        self.assertEqual(config.get_recent(cfg, "ws/repo", "prod"),
+                         {"branches": [], "pipelines": []})
+
+    def test_nothing_to_record_is_a_noop(self):
+        cfg = {}
+        config.record_recent(cfg, "ws/repo", "qa")
+        config.record_recent(cfg, "ws/repo", "", branch="qa-1")
+        self.assertEqual(cfg, {})
+
+    def test_get_last_run_accessor(self):
+        cfg = {}
+        self.assertEqual(config.get_last_run(cfg, "ws/repo"), {})
+        config.set_last_run(cfg, "ws/repo", "deploy", "main", "qa", {})
+        self.assertEqual(config.get_last_run(cfg, "ws/repo")["pipeline"], "deploy")
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_recents_survive_alongside_variables_remembered_last_run(self):
+        # dumps() is a whitelist emitter — this is the "silently dropped on save"
+        # regression guard.
+        cfg = sample_cfg()
+        config.remember_value(cfg, "ws/repo", "Svcs", "core")
+        config.set_last_run(cfg, "ws/repo", "deploy", "main", "qa", {"Env": "a"})
+        config.record_recent(cfg, "ws/repo", "qa", pipeline="DEPLOY", branch="qa-7")
+        config.record_recent(cfg, "ws/repo", "prod", pipeline="SHIP", branch="prod-3")
+
+        r = tomllib.loads(config.dumps(cfg))["repos"]["ws/repo"]
+        self.assertEqual(r["recent"]["qa"]["pipelines"], ["DEPLOY"])
+        self.assertEqual(r["recent"]["qa"]["branches"], ["qa-7"])
+        self.assertEqual(r["recent"]["prod"]["branches"], ["prod-3"])
+        # …and the pre-existing state is untouched.
+        self.assertEqual(r["variables"]["Env"]["enum"], ["a", "b"])
+        self.assertEqual(r["remembered"]["Svcs"], ["core"])
+        self.assertEqual(r["last_run"]["pipeline"], "deploy")
+
+
+class ProdRetryConfig(unittest.TestCase):
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_global_prod_retry_round_trips(self):
+        self.assertIs(tomllib.loads(config.dumps({"prod_retry": True}))["prod_retry"],
+                      True)
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_per_repo_explicit_false_round_trips(self):
+        # An explicit per-repo false must survive — it's how a repo opts OUT of a
+        # global prod_retry = true, so it can't be treated as "absent".
+        cfg = {"prod_retry": True, "repos": {"ws/repo": {"prod_retry": False}}}
+        reparsed = tomllib.loads(config.dumps(cfg))
+        self.assertIs(reparsed["repos"]["ws/repo"]["prod_retry"], False)
+
+    @unittest.skipIf(tomllib is None, "tomllib requires Python 3.11+")
+    def test_absent_per_repo_key_is_not_emitted(self):
+        cfg = {"repos": {"ws/repo": {"provider": "bitbucket"}}}
+        reparsed = tomllib.loads(config.dumps(cfg))
+        self.assertNotIn("prod_retry", reparsed["repos"]["ws/repo"])
+
+
 if __name__ == "__main__":
     unittest.main()

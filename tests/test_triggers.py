@@ -1,8 +1,12 @@
-"""trigger_request body shapes for both adapters (pure — no network/auth)."""
+"""trigger_request body shapes for both adapters (pure — no network/auth),
+plus the shared _finish_run gate/policy branches."""
 
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
-from repipe.model import Target
+from repipe import cli
+from repipe.model import Run, RunState, Target
 from repipe.providers.bitbucket import BitbucketProvider
 from repipe.providers.ghactions import GitHubActionsProvider
 
@@ -36,6 +40,87 @@ class GitHubTrigger(unittest.TestCase):
         self.assertEqual(p._map_state({"status": "completed", "conclusion": "failure"})[0], "FAILED")
         self.assertEqual(p._map_state({"status": "in_progress", "conclusion": None})[0], "RUNNING")
         self.assertEqual(p._map_state({"status": "waiting", "conclusion": None})[0], "HALTED")
+
+
+class FinishRunProdPolicy(unittest.TestCase):
+    """The prod branches of cli._finish_run, driven offline with a fake provider."""
+
+    class FakeProvider:
+        NAME = "fake"
+        TARGET_WORD = "pipeline"
+        workspace = "ws"
+        repo = "repo"
+
+        def trigger_request(self, target, ref, variables):
+            return "POST", "https://example.invalid/trigger", {}
+
+        def trigger(self, target, ref, variables, auth):
+            return Run(id="1", number=1, state=RunState.RUNNING)
+
+    def _args(self, **over):
+        base = dict(dry_run=False, yes=False, no_wait=True, force=False,
+                    detach=False, path=".", retry_on=["oom"], max_retries=2)
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def _run(self, target, args, confirmed=False):
+        # Stub every side effect: remote probe, auth, announce, config write.
+        with mock.patch.object(cli, "remote_has_branch", return_value=None), \
+                mock.patch.object(cli, "get_auth", return_value=None), \
+                mock.patch.object(cli, "_announce"), \
+                mock.patch.object(cli, "_record_recent") as rec, \
+                mock.patch("builtins.print"):
+            code = cli._finish_run(self.FakeProvider(), target, "ref", [], args,
+                                   confirmed=confirmed)
+        return code, rec
+
+    def test_confirmed_skips_the_typed_name_gate(self):
+        # What the interactive flow now does: its Confirm step is the confirmation.
+        target = Target(name="DEPLOY_PROD", env="prod")
+        with mock.patch.object(cli, "_prod_gate",
+                               side_effect=AssertionError("gate ran")) as gate:
+            code, _ = self._run(target, self._args(), confirmed=True)
+        self.assertEqual(code, cli.EXIT_OK)
+        gate.assert_not_called()
+
+    def test_unconfirmed_still_gates(self):
+        # `run` / `rerun` keep the typed-name gate.
+        target = Target(name="DEPLOY_PROD", env="prod")
+        with mock.patch.object(cli, "_prod_gate") as gate:
+            self._run(target, self._args(), confirmed=False)
+        gate.assert_called_once()
+
+    def test_prod_without_force_disables_retry(self):
+        target = Target(name="DEPLOY_PROD", env="prod")
+        args = self._args(force=False)
+        self._run(target, args, confirmed=True)
+        self.assertIsNone(args.retry_on)
+        self.assertEqual(args.max_retries, 0)
+
+    def test_prod_with_force_keeps_retry(self):
+        # force=True is what `prod_retry` config resolves to via _resolve_prod_retry.
+        target = Target(name="DEPLOY_PROD", env="prod")
+        args = self._args(force=True)
+        self._run(target, args, confirmed=True)
+        self.assertEqual(args.retry_on, ["oom"])
+        self.assertEqual(args.max_retries, 2)
+
+    def test_qa_retry_untouched(self):
+        target = Target(name="DEPLOY_QA", env="qa")
+        args = self._args(force=False)
+        self._run(target, args, confirmed=True)
+        self.assertEqual(args.retry_on, ["oom"])
+        self.assertEqual(args.max_retries, 2)
+
+    def test_records_recents_after_a_real_trigger(self):
+        target = Target(name="DEPLOY_QA", env="qa")
+        _, rec = self._run(target, self._args(), confirmed=True)
+        rec.assert_called_once_with("ws/repo", "qa", "DEPLOY_QA", "ref")
+
+    def test_dry_run_records_nothing(self):
+        target = Target(name="DEPLOY_QA", env="qa")
+        _, rec = self._run(target, self._args(dry_run=True), confirmed=True)
+        rec.assert_not_called()
 
 
 if __name__ == "__main__":

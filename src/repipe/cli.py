@@ -180,12 +180,30 @@ def cmd_run(args) -> int:
     # Retry patterns: explicit --retry-on wins, else per-repo override, else the
     # global default. (Previously `run` ignored config retry_on entirely.)
     args.retry_on = _resolve_retry(cfg, f"{workspace}/{repo}", args.retry_on)
+    # Prod auto-retry: --force still wins, but `prod_retry` in config is standing
+    # consent so scripted prod runs don't need the flag every time.
+    args.force = _resolve_prod_retry(cfg, f"{workspace}/{repo}", args.force)
 
     return _finish_run(provider, target, ref, variables, args)
 
 
+def _record_recent(repo_key, env, pipeline, ref):
+    """Persist the MRU pipeline/branch for this env so the interactive pickers can
+    suggest them next time. Re-reads config rather than reusing a caller's copy,
+    because the caller may hold one from before a long watch loop. Best-effort:
+    a config write must never fail a run that was already triggered."""
+    try:
+        cfg = config.load()
+        config.record_recent(cfg, repo_key, env, pipeline=pipeline, branch=ref)
+        config.save(cfg)
+    except Exception:
+        pass
+
+
 def _prod_gate(target, args):
-    """Prod triggers require explicit confirmation to start at all."""
+    """Prod triggers require explicit confirmation to start at all. Guards the
+    non-interactive paths (`run`/`rerun`); the interactive flow confirms via its
+    own Confirm step and passes confirmed=True."""
     if target.env != "prod" or args.dry_run:
         return
     if getattr(args, "yes", False):
@@ -241,13 +259,16 @@ def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
     # (there is no shipped "safe" pattern set to fall back on).
     if target.env == "prod" and not getattr(args, "force", False):
         if args.retry_on or args.max_retries:
-            print("  (prod: auto-retry disabled; use --force to retry on your configured patterns)")
+            print("  (prod: auto-retry disabled; --force, or `prod_retry = true` in "
+                  "config, retries on your configured patterns)")
         args.retry_on = None
         args.max_retries = 0
 
     auth = get_auth(required=True)
     run = provider.trigger(target, ref, variables, auth)
     _announce(target.name, ref, run)
+    _record_recent(f"{provider.workspace}/{provider.repo}", target.env,
+                   target.name, ref)
 
     if args.no_wait:
         print("\n(--no-wait: triggered only, not watching)")
@@ -389,6 +410,20 @@ def _resolve_retry(cfg, repo_key, explicit=None):
     if repo_patterns:
         return list(repo_patterns)
     return cfg.get("retry_on")
+
+
+def _resolve_prod_retry(cfg, repo_key, explicit_force=False) -> bool:
+    """Standing consent for prod auto-retry, so you don't need --force every time.
+    Precedence: an explicit --force wins; else the repo's own `prod_retry`; else
+    the global `prod_retry`; else off. Shared by `run`, the interactive flow, and
+    `rerun`. Membership-tested (not .get) so an explicit per-repo `false` can opt
+    a repo OUT of a global `true`."""
+    if explicit_force:
+        return True
+    repo_cfg = config.get_repo(cfg, repo_key)
+    if "prod_retry" in repo_cfg:
+        return bool(repo_cfg["prod_retry"])
+    return bool(cfg.get("prod_retry", False))
 
 
 def _mask_secret(url: str) -> str:
@@ -672,6 +707,10 @@ def _run_args_namespace(**overrides):
     return argparse.Namespace(**d)
 
 
+# Escape-hatch row in the Branch picker that routes to a free-text prompt.
+_MANUAL_BRANCH = "enter manually…"
+
+
 def _ask_var(var, provided, entry, remembered, step):
     """Prompt for a single pipeline variable; returns the value or interactive.BACK.
     Uses any prior answer (from going back) as the default. All behavior is
@@ -723,11 +762,28 @@ def cmd_interactive(args) -> int:
         # Skip any variable that can be auto-filled from a known source.
         return [v for v in target.variables if not autofill_value(v)]
 
+    # Recently executed pipelines, per env. Each target carries its own env, so a
+    # row is matched against ITS env's history — no need to know the chosen env yet.
+    recent_pipelines = {}
+
+    def suggested(target):
+        env = target.env
+        if env not in recent_pipelines:
+            recent_pipelines[env] = set(
+                config.get_recent(cfg, repo_key, env)["pipelines"])
+        return target.name in recent_pipelines[env]
+
     def step_pipeline():
-        di = targets.index(st["target"]) if st.get("target") in targets else 0
+        if st.get("target") in targets:
+            di = targets.index(st["target"])        # returning via back-nav
+        else:
+            last = config.get_last_run(cfg, repo_key).get("pipeline")
+            di = next((i for i, t in enumerate(targets) if t.name == last), 0)
         chosen = interactive.pick(
             "Pipeline", targets, default_idx=di, allow_back=False, step=(1, total()),
-            to_str=lambda t: f"{t.name}  {interactive.env_badge(t.env)}",
+            to_str=lambda t: f"{t.name}  {interactive.env_badge(t.env)}"
+                             + (f"  {interactive.dim('suggested')}"
+                                if suggested(t) else ""),
         )
         if chosen is interactive.BACK:
             return "back"
@@ -748,14 +804,24 @@ def cmd_interactive(args) -> int:
         return "next"
 
     def step_branch():
-        prefix = rcfg.get(f"{st['env']}_branch_prefix") or f"{st['env']}-release"
+        env = st["env"]
+        prefix = rcfg.get(f"{env}_branch_prefix") or f"{env}-release"
+        # Branches you actually ran for THIS env come first, so the common
+        # "same branch again" case is a single Enter. Not filtered against local
+        # refs: a stale row costs one keystroke, hiding a valid branch costs more.
+        recents = config.get_recent(cfg, repo_key, env)["branches"]
         cands = branch_candidates(args.path, branch, prefix)
-        options = cands + ["enter manually…"]
+        options = recents + [b for b in cands if b not in recents] + [_MANUAL_BRANCH]
+        marked = set(recents)
         di = options.index(st["ref"]) if st.get("ref") in options else 0
-        chosen = interactive.pick("Branch", options, default_idx=di, step=(3, total()))
+        chosen = interactive.pick(
+            "Branch", options, default_idx=di, step=(3, total()),
+            to_str=lambda b: (f"{b}  {interactive.dim('suggested')}"
+                              if b in marked else b),
+        )
         if chosen is interactive.BACK:
             return "back"
-        if chosen == "enter manually…":
+        if chosen == _MANUAL_BRANCH:
             typed = interactive.ask("Branch name", default=st.get("ref") or branch,
                                     step=(3, total()))
             if typed is interactive.BACK:
@@ -832,15 +898,16 @@ def cmd_interactive(args) -> int:
     target, ref, variables = st["target"], st["ref"], st["variables"]
     retry_on = _resolve_retry(cfg, repo_key)
     max_retries = cfg.get("max_retries", 2)
-    # Prod auto-retry is off by default; offer an explicit opt-in (the
-    # interactive equivalent of `run --force`). Only ask when retry is
-    # actually configured, and never non-interactively (parity with --force).
-    force = False
+    # Prod auto-retry: offer an explicit opt-in (the interactive equivalent of
+    # `run --force`), defaulted from `prod_retry` so standing consent means a bare
+    # Enter says yes. Only ask when retry is actually configured, and never
+    # non-interactively (parity with --force).
+    force = _resolve_prod_retry(cfg, repo_key)
     detach = getattr(args, "detach", False)
     if target.env == "prod" and not args.dry_run and not args.yes:
         if retry_on or max_retries:
             force = interactive.confirm(
-                "Auto-retry this PROD run on transient failures?", default=False)
+                "Auto-retry this PROD run on transient failures?", default=force)
         # Prod deploys are long and often pause at a manual gate — the exact case
         # where you walk away. Offer to keep watching (and notify) in the
         # background so closing this terminal doesn't cost you the notification.
@@ -860,10 +927,16 @@ def cmd_interactive(args) -> int:
         push_cfg=_push_cfg_from(cfg),
         notify_events=cfg.get("notify_events"),
     )
+    # The Confirm step above IS the prod confirmation — no typed-name gate on top
+    # of it. Under --yes that step never renders, so let _prod_gate run: its own
+    # --yes branch prints the PRODUCTION warning without prompting.
     code = _finish_run(provider, target, ref, variables, rargs,
-                       confirmed=(target.env != "prod"))
+                       confirmed=not args.yes)
 
     if not args.dry_run:
+        # Re-read: `cfg` was loaded before the run, and _finish_run recorded the
+        # recents since. Saving the stale copy would drop them.
+        cfg = config.load()
         if st["new_email"]:
             cfg["user_email"] = st["new_email"]
         vmap = dict(variables)
@@ -1108,7 +1181,7 @@ def cmd_rerun(args) -> int:
     provider = choose_provider(host, args.provider)(workspace, repo)
     key = f"{workspace}/{repo}"
     cfg = config.load()
-    lr = config.get_repo(cfg, key).get("last_run")
+    lr = config.get_last_run(cfg, key)
     if not lr:
         raise RepipeError(
             f"no last run recorded for {key} — run `repipe` first.", EXIT_CONFIG
@@ -1125,6 +1198,7 @@ def cmd_rerun(args) -> int:
         match=cfg.get("match", "substring"),
         max_retries=cfg.get("max_retries", 2),
         retry_on=_resolve_retry(cfg, key),
+        force=_resolve_prod_retry(cfg, key),
         poll_interval=cfg.get("poll_interval", 20),
         timeout=cfg.get("timeout", 3600),
         notify=cfg.get("notify", True),
@@ -1142,12 +1216,20 @@ def cmd_rerun(args) -> int:
 _CONFIG_DEFAULTS = {
     "max_retries": 2, "match": "substring",
     "poll_interval": 20, "timeout": 3600,
+    "prod_retry": False,
     "notify": True, "notify_steps": False,
 }
 # Each push provider contributes its (empty-by-default) URL key, so adding a
 # provider to the registry needs no change here.
 for _p in notify_mod.PUSH_PROVIDERS:
     _CONFIG_DEFAULTS.setdefault(_p["config_key"], "")
+
+# Global on/off settings the menu edits with a y/N confirm, and their prompt text.
+_BOOL_PROMPTS = {
+    "notify": "Enable notifications?",
+    "notify_steps": "Notify on each step?",
+    "prod_retry": "Auto-retry PROD runs without --force?",
+}
 
 
 def _config_show(cfg, reveal=False) -> int:
@@ -1162,6 +1244,7 @@ def _config_show(cfg, reveal=False) -> int:
     print(f"  match mode     : {cfg.get('match', _CONFIG_DEFAULTS['match'])}")
     print(f"  poll interval  : {cfg.get('poll_interval', _CONFIG_DEFAULTS['poll_interval'])}s")
     print(f"  timeout        : {cfg.get('timeout', _CONFIG_DEFAULTS['timeout'])}s")
+    print(f"  prod auto-retry: {onoff(cfg.get('prod_retry', _CONFIG_DEFAULTS['prod_retry']))}")
     print(f"  notifications  : {onoff(cfg.get('notify', _CONFIG_DEFAULTS['notify']))}")
     print(f"  notify per-step: {onoff(cfg.get('notify_steps', _CONFIG_DEFAULTS['notify_steps']))}")
     print(f"  notify events  : {_notify_events_summary(cfg)}")
@@ -1308,6 +1391,26 @@ def _pick_provider(cur):
     return sel[0]
 
 
+def _edit_prod_retry(r) -> bool:
+    """Set a repo's prod auto-retry override. Tri-state, so `_toggle_field` (which
+    can only write a bool) doesn't fit: "use global" DELETES the key, while an
+    explicit off writes `false` to opt this repo out of a global `true`."""
+    options = [(None, "use global"), (True, "on"), (False, "off")]
+    # Normalise to the three singletons so a hand-written `prod_retry = 1` still
+    # maps onto a row instead of blowing up the lookup.
+    cur = bool(r["prod_retry"]) if "prod_retry" in r else None
+    di = next(i for i, (v, _) in enumerate(options) if v is cur)
+    sel = interactive.pick("Prod auto-retry", options, default_idx=di,
+                           to_str=lambda x: x[1])
+    if sel is interactive.BACK or sel[0] is cur:
+        return False
+    if sel[0] is None:
+        r.pop("prod_retry", None)
+    else:
+        r["prod_retry"] = sel[0]
+    return True
+
+
 def _edit_repo(cfg, key) -> bool:
     """Submenu editing a repo's flat string fields. Returns True if changed."""
     changed = False
@@ -1322,6 +1425,9 @@ def _edit_repo(cfg, key) -> bool:
         n_over = len(r.get("retry_on") or [])
         retry_desc = f"{n_over} pattern(s), overrides default" if n_over else "using default"
         rows.append(("__retry__", f"{'Retry patterns':<18}{retry_desc}  ›"))
+        prod_desc = ("using global" if "prod_retry" not in r
+                     else ("on" if r["prod_retry"] else "off") + ", overrides global")
+        rows.append(("__prod_retry__", f"{'Prod auto-retry':<18}{prod_desc}  ›"))
         rows.append(("__vars__", f"Variables ({len(r.get('variables') or {})})  ›"))
         rows.append(("done", "Done"))
         sel = interactive.pick(f"Repo: {key}", rows,
@@ -1332,6 +1438,9 @@ def _edit_repo(cfg, key) -> bool:
             # Editing the repo dict's own retry_on = an override of the default set.
             if _edit_patterns(config.ensure_repo(cfg, key), f"{key} retry override"):
                 changed = True
+            continue
+        if sel == "__prod_retry__":
+            changed = _edit_prod_retry(config.ensure_repo(cfg, key)) or changed
             continue
         if sel == "__vars__":
             changed = _edit_variables(cfg, key) or changed
@@ -1651,6 +1760,7 @@ def cmd_config(args) -> int:
                 ("match", f"Match mode        {cfg.get('match', d['match'])}"),
                 ("poll_interval", f"Poll interval     {cfg.get('poll_interval', d['poll_interval'])}s"),
                 ("timeout", f"Timeout           {cfg.get('timeout', d['timeout'])}s"),
+                ("prod_retry", f"Prod auto-retry   {onoff(cfg.get('prod_retry', d['prod_retry']))}"),
                 ("notify", f"Notifications     {onoff(cfg.get('notify', d['notify']))}"),
                 ("notify_steps", f"Notify per-step   {onoff(cfg.get('notify_steps', d['notify_steps']))}"),
                 ("notify_events", f"Notify on events  {_notify_events_summary(cfg)}  ›"),
@@ -1691,10 +1801,9 @@ def cmd_config(args) -> int:
                 if v != cfg.get(key, d[key]):
                     cfg[key] = v
                     dirty = True
-            elif key in ("notify", "notify_steps"):
+            elif key in _BOOL_PROMPTS:
                 cur = cfg.get(key, d[key])
-                prompt = "Enable notifications?" if key == "notify" else "Notify on each step?"
-                new = interactive.confirm(prompt, default=cur)
+                new = interactive.confirm(_BOOL_PROMPTS[key], default=cur)
                 if new != cur:
                     cfg[key] = new
                     dirty = True

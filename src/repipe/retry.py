@@ -18,6 +18,8 @@ SUGGESTED_RETRY_PATTERNS = [
     "could not resolve host",
     "temporary failure in name resolution",
     "connection timed out",
+    "connect timed out",                 # java/maven/gradle socket errors
+    "operation timed out",               # curl / macOS / raw socket
     "connection reset by peer",
     "network is unreachable",
     "no route to host",

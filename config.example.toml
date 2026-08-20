@@ -68,6 +68,13 @@ max_retries = 2
 # --retry-on beats both. Run `repipe suggestions` for a starter list to copy.
 retry_on = ["Could not resolve host", "OutOfMemoryError", "toomanyrequests"]
 
+# PROD auto-retry. Prod runs normally refuse to auto-retry unless you pass
+# --force, since there's no shipped "safe" pattern set to fall back on. Set this
+# to true to record standing consent so `repipe run` doesn't need the flag every
+# time (the interactive flow still asks, but defaults to yes).
+# Precedence: --force > per-repo `prod_retry` > this global > off.
+# prod_retry = false
+
 # ---------------------------------------------------------------------------
 # Per-repo — keyed by "<workspace>/<repo>" (Bitbucket) or "<owner>/<repo>" (GitHub)
 # `provider` is auto-detected from the git remote on `repipe init`:
@@ -81,6 +88,9 @@ prod_branch_prefix = "prod-release"
 # Optional: this repo's OWN retry patterns. When present they fully REPLACE the
 # default retry_on above for this repo (not merged). Omit to use the default.
 # retry_on = ["flaky integration suite", "error pulling image"]
+# Optional: override the global `prod_retry` for this repo. Omit to inherit it;
+# an explicit false opts this repo out even when the global is true.
+# prod_retry = true
 
 # A GitHub Actions repo looks the same — repipe reads workflow_dispatch inputs
 # from .github/workflows/*.yml, so `enum`/`default` often come for free.
@@ -121,3 +131,6 @@ hint             = "space-separate multiple only when MultiService=true"
 # repipe also persists per-repo state under this repo section as you use it:
 #   [repos."ws/repo".remembered]  — values for `remember = true` variables
 #   [repos."ws/repo".last_run]    — so `repipe rerun` can repeat your last run
+#   [repos."ws/repo".recent.<env>] — the last few branches/pipelines you actually
+#                                   ran for that env, so the interactive pickers
+#                                   list them first and mark them `suggested`

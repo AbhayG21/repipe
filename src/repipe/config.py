@@ -3,11 +3,18 @@
 Read with stdlib tomllib (3.11+). stdlib has no TOML *writer*, so we emit our
 own for the small, known schema below — repos keyed by "<ws>/<repo>", plus a
 hand-edited per-repo `[…variables]` schema and tool-persisted state
-(`[…remembered]` values, `last_run`) that `rerun` reads back.
+(`[…remembered]` values, `last_run` that `rerun` reads back, and
+`[…recent.<env>]` MRU lists that the interactive pickers suggest from).
+
+NOTE: dumps() is a *whitelist* emitter — a key it doesn't know about is dropped
+on the next save(). Any new setting must be added there too.
 """
 
 import os
 import re
+
+# How many recently-executed branches/pipelines to keep per env.
+_RECENT_LIMIT = 5
 
 try:
     import tomllib  # Python 3.11+
@@ -80,7 +87,7 @@ def dumps(cfg: dict) -> str:
     push_keys = tuple(p["config_key"] for p in notify.PUSH_PROVIDERS)
     lines = []
     for k in ("user_email", "match", "max_retries",
-              "poll_interval", "timeout", "notify", "notify_steps",
+              "poll_interval", "timeout", "prod_retry", "notify", "notify_steps",
               "notify_events") + push_keys:
         if k in cfg:
             lines.append(f"{k} = {_val(cfg[k])}")
@@ -98,6 +105,10 @@ def dumps(cfg: dict) -> str:
         for k in ("provider", "qa_branch_prefix", "prod_branch_prefix"):
             if k in r:
                 lines.append(f"{k} = {_val(r[k])}")
+        # Tri-state: absent ⇒ inherit the global. An explicit false must survive
+        # the round-trip so a repo can opt OUT of a global `prod_retry = true`.
+        if "prod_retry" in r:
+            lines.append(f"prod_retry = {_val(bool(r['prod_retry']))}")
         if r.get("retry_on"):  # per-repo override of the default retry patterns
             lines.append(f"retry_on = {_val(r['retry_on'])}")
         # Per-variable schema (hand-edited). Re-emitted so a tool-triggered
@@ -114,6 +125,16 @@ def dumps(cfg: dict) -> str:
             lines.append(f"[{header}.remembered]")
             for rk, rv in remembered.items():
                 lines.append(f"{_key(rk)} = {_val(rv)}")
+        # MRU history per env, so the interactive pickers can suggest.
+        for env in sorted(r.get("recent") or {}):
+            entry = (r["recent"] or {}).get(env) or {}
+            rows = [(k, entry[k]) for k in ("branches", "pipelines") if entry.get(k)]
+            if not rows:
+                continue
+            lines.append("")
+            lines.append(f"[{header}.recent.{_key(env)}]")
+            for k, v in rows:
+                lines.append(f"{k} = {_val(v)}")
         lr = r.get("last_run") or {}
         if lr:
             lines.append("")
@@ -156,6 +177,41 @@ def remember_value(cfg: dict, key: str, varname: str, value: str):
     values = remembered.setdefault(varname, [])
     if value not in values:
         values.append(value)
+
+
+def _push_mru(values: list, value: str, limit: int = _RECENT_LIMIT) -> list:
+    """Move `value` to the front of a most-recently-used list, capped at `limit`.
+    Unlike remember_value's append-only ordering, a re-used value climbs back to
+    the top — that's what makes it worth pre-selecting."""
+    out = [v for v in values if v != value]
+    out.insert(0, value)
+    return out[:limit]
+
+
+def get_recent(cfg: dict, key: str, env: str) -> dict:
+    """Recently executed branches/pipelines for one env, most recent first.
+    Always returns both keys (empty lists when nothing is recorded)."""
+    entry = ((get_repo(cfg, key).get("recent") or {}).get(env)) or {}
+    return {
+        "branches": list(entry.get("branches") or []),
+        "pipelines": list(entry.get("pipelines") or []),
+    }
+
+
+def record_recent(cfg: dict, key: str, env: str, pipeline=None, branch=None):
+    """Push an executed pipeline/branch onto that env's MRU lists."""
+    if not env or not (pipeline or branch):
+        return
+    entry = ensure_repo(cfg, key).setdefault("recent", {}).setdefault(env, {})
+    for field, value in (("pipelines", pipeline), ("branches", branch)):
+        if value:
+            entry[field] = _push_mru(list(entry.get(field) or []), value)
+
+
+def get_last_run(cfg: dict, key: str) -> dict:
+    """The single-slot last run for a repo ({} if none) — what `rerun` repeats
+    and what the interactive pipeline picker puts its cursor on."""
+    return get_repo(cfg, key).get("last_run") or {}
 
 
 def set_last_run(cfg: dict, key: str, pipeline, branch, env, variables: dict):

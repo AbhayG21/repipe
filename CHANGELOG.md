@@ -9,6 +9,16 @@ Release notes for each version are also on the
 [GitHub Releases](https://github.com/AbhayG21/repipe/releases) page.
 
 ## [Unreleased]
+- The Branch and Pipeline pickers now suggest what you recently ran, per
+  environment: recent branches are listed first and marked `suggested`, and the
+  cursor starts on your last-run pipeline.
+- New `prod_retry` setting (global, with a per-repo override) records standing
+  consent for prod auto-retry, so `repipe run` no longer needs `--force` every
+  time. `--force` still wins; editable in `repipe config`.
+- Triggering a prod pipeline from the interactive flow no longer asks you to type
+  the pipeline name — its Confirm step is the confirmation. `repipe run` and
+  `repipe rerun` still require the typed name.
+- Added `connect timed out` and `operation timed out` to `repipe suggestions`.
 - Pre-flight check: before triggering, verify the branch exists on the `origin`
   remote and fail early with a clear message if it isn't pushed — instead of an
   opaque 404 after the prod confirmation. Best-effort (bounded, never blocks when
