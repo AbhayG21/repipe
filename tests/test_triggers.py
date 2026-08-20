@@ -42,6 +42,61 @@ class GitHubTrigger(unittest.TestCase):
         self.assertEqual(p._map_state({"status": "waiting", "conclusion": None})[0], "HALTED")
 
 
+class ProdGate(unittest.TestCase):
+    """_prod_gate is a Yes/No menu now — no retyped pipeline name."""
+
+    PROD = Target(name="DEPLOY_PROD", env="prod")
+
+    def _args(self, **over):
+        base = dict(dry_run=False, yes=False)
+        base.update(over)
+        return SimpleNamespace(**base)
+
+    def test_never_prompts_for_a_typed_name(self):
+        with mock.patch.object(cli.interactive, "confirm_menu", return_value=True), \
+                mock.patch("builtins.input",
+                           side_effect=AssertionError("asked for typed input")), \
+                mock.patch("builtins.print"):
+            cli._prod_gate(self.PROD, self._args())
+
+    def test_yes_proceeds(self):
+        with mock.patch.object(cli.interactive, "confirm_menu",
+                               return_value=True) as m, \
+                mock.patch("builtins.print"):
+            cli._prod_gate(self.PROD, self._args())
+        m.assert_called_once()
+        self.assertFalse(m.call_args.kwargs["default"])   # No is pre-selected
+
+    def test_no_aborts(self):
+        with mock.patch.object(cli.interactive, "confirm_menu", return_value=False), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(cli.RepipeError) as e:
+                cli._prod_gate(self.PROD, self._args())
+        self.assertEqual(e.exception.code, cli.EXIT_CONFIG)
+
+    def test_qa_and_dry_run_are_never_gated(self):
+        with mock.patch.object(cli.interactive, "confirm_menu",
+                               side_effect=AssertionError("gated")):
+            cli._prod_gate(Target(name="DEPLOY_QA", env="qa"), self._args())
+            cli._prod_gate(self.PROD, self._args(dry_run=True))
+
+    def test_yes_flag_skips_the_menu(self):
+        with mock.patch.object(cli.interactive, "confirm_menu",
+                               side_effect=AssertionError("prompted under --yes")), \
+                mock.patch("builtins.print"):
+            cli._prod_gate(self.PROD, self._args(yes=True))
+
+    def test_no_stdin_keeps_the_actionable_message(self):
+        # Piped/CI: the picker can't read an answer, so re-raise with the --yes hint
+        # rather than interactive's generic "interactive input required".
+        boom = cli.RepipeError("interactive input required", cli.EXIT_CONFIG)
+        with mock.patch.object(cli.interactive, "confirm_menu", side_effect=boom), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(cli.RepipeError) as e:
+                cli._prod_gate(self.PROD, self._args())
+        self.assertIn("--yes", str(e.exception))
+
+
 class FinishRunProdPolicy(unittest.TestCase):
     """The prod branches of cli._finish_run, driven offline with a fake provider."""
 

@@ -9,6 +9,10 @@ Release notes for each version are also on the
 [GitHub Releases](https://github.com/AbhayG21/repipe/releases) page.
 
 ## [Unreleased]
+- Prod confirmation is a Yes/No menu everywhere now, with **No** pre-selected:
+  `repipe run` and `repipe rerun` no longer ask you to type the pipeline name.
+- The prod auto-retry and background-watch questions are arrow-key menus instead
+  of typed `[y/N]` prompts.
 
 ## [2.4.0] - 2026-08-20
 - The Branch and Pipeline pickers now suggest what you recently ran, per
@@ -21,6 +25,10 @@ Release notes for each version are also on the
   the pipeline name — its Confirm step is the confirmation. `repipe run` and
   `repipe rerun` still require the typed name.
 - Added `connect timed out` and `operation timed out` to `repipe suggestions`.
+- Detached watch mode: `repipe run -d/--detach` keeps watching in the background,
+  so the finish notification still arrives after you close the terminal. Per-run
+  logs land in `~/.config/repipe/logs/`. (Shipped in this release but omitted from
+  the original notes.)
 - Pre-flight check: before triggering, verify the branch exists on the `origin`
   remote and fail early with a clear message if it isn't pushed — instead of an
   opaque 404 after the prod confirmation. Best-effort (bounded, never blocks when

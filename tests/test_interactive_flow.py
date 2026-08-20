@@ -185,5 +185,90 @@ class InteractiveFlow(unittest.TestCase):
         self.assertNotIn("suggested", seen["rows"][-1])   # never tag the escape hatch
 
 
+class ConfirmMenu(unittest.TestCase):
+    """interactive.confirm_menu — Yes/No as a picker instead of a typed y/N."""
+
+    def test_maps_selection_to_bool(self):
+        from repipe import interactive
+        with mock.patch.object(interactive, "pick",
+                               side_effect=lambda l, items, **k: items[0]):
+            self.assertIs(interactive.confirm_menu("go?"), True)
+        with mock.patch.object(interactive, "pick",
+                               side_effect=lambda l, items, **k: items[1]):
+            self.assertIs(interactive.confirm_menu("go?"), False)
+
+    def test_default_picks_the_matching_row(self):
+        from repipe import interactive
+        seen = {}
+
+        def spy(label, items, **kw):
+            seen["idx"] = kw["default_idx"]
+            seen["rows"] = [kw["to_str"](i) for i in items]
+            seen["back"] = kw["allow_back"]
+            return items[kw["default_idx"]]
+
+        with mock.patch.object(interactive, "pick", side_effect=spy):
+            self.assertIs(interactive.confirm_menu("go?", default=True), True)
+            self.assertEqual((seen["idx"], seen["rows"]), (0, ["Yes", "No"]))
+            self.assertFalse(seen["back"])        # nothing to go back to
+            self.assertIs(interactive.confirm_menu("go?", default=False), False)
+            self.assertEqual(seen["idx"], 1)
+
+    def test_numbered_fallback_reads_a_number(self):
+        # No TTY in the test runner, so pick() degrades to the numbered prompt.
+        from repipe import interactive
+        with mock.patch.object(interactive, "_input", return_value="1"), \
+                mock.patch("builtins.print"):
+            self.assertIs(interactive.confirm_menu("go?"), True)
+        with mock.patch.object(interactive, "_input", return_value="2"), \
+                mock.patch("builtins.print"):
+            self.assertIs(interactive.confirm_menu("go?", default=True), False)
+        with mock.patch.object(interactive, "_input", return_value=""), \
+                mock.patch("builtins.print"):
+            self.assertIs(interactive.confirm_menu("go?", default=True), True)
+
+
+class ProdPromptsAreMenus(unittest.TestCase):
+    """The interactive prod tail asks via menus, never a typed y/N."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": self.tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_retry_and_detach_use_confirm_menu(self):
+        picks = ["DEPLOY_PROD", "prod", "main", "Trigger it"]
+
+        def fake_pick(label, items, **kw):
+            want = picks.pop(0)
+            for it in items:
+                if getattr(it, "name", it) == want:
+                    return it
+            raise AssertionError(f"{want!r} not offered for {label!r}")
+
+        with mock.patch.object(cli, "detect_repo",
+                              return_value=("bitbucket.org", "acme", "widget", "main")), \
+                mock.patch.object(cli, "choose_provider", return_value=FakeProvider), \
+                mock.patch.object(cli, "branch_candidates", return_value=["main"]), \
+                mock.patch.object(cli.interactive, "live", return_value=False), \
+                mock.patch.object(cli.interactive, "banner"), \
+                mock.patch.object(cli.interactive, "pick", side_effect=fake_pick), \
+                mock.patch.object(cli.interactive, "confirm_menu",
+                                  return_value=False) as menu, \
+                mock.patch.object(cli.interactive, "confirm",
+                                  side_effect=AssertionError("typed y/N used")), \
+                mock.patch.object(cli, "_finish_run", return_value=cli.EXIT_OK), \
+                mock.patch("builtins.print"):
+            cli.cmd_interactive(SimpleNamespace(path=".", provider=None,
+                                                dry_run=False, yes=False, detach=False))
+
+        asked = [c.args[0] for c in menu.call_args_list]
+        self.assertEqual(len(asked), 2, asked)
+        self.assertIn("Auto-retry", asked[0])
+        self.assertIn("background", asked[1])
+
+
 if __name__ == "__main__":
     unittest.main()

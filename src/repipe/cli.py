@@ -201,7 +201,8 @@ def _record_recent(repo_key, env, pipeline, ref):
 
 
 def _prod_gate(target, args):
-    """Prod triggers require explicit confirmation to start at all. Guards the
+    """Prod triggers need an explicit yes before anything is sent — a Yes/No menu,
+    not a retyped pipeline name you just selected from a list. Guards the
     non-interactive paths (`run`/`rerun`); the interactive flow confirms via its
     own Confirm step and passes confirmed=True."""
     if target.env != "prod" or args.dry_run:
@@ -209,18 +210,17 @@ def _prod_gate(target, args):
     if getattr(args, "yes", False):
         print(f"⚠ '{target.name}' is a PRODUCTION pipeline — proceeding (--yes).")
         return
+    print(interactive.red(f"⚠ '{target.name}' is a PRODUCTION pipeline."))
     try:
-        ans = input(
-            f"⚠ '{target.name}' is a PRODUCTION pipeline. "
-            f"Type the pipeline name to confirm: "
-        ).strip()
-    except EOFError:
+        ok = interactive.confirm_menu(f"Trigger {target.name}?", default=False)
+    except RepipeError:
+        # No stdin to answer with (piped/CI) — keep the actionable message.
         raise RepipeError(
             "prod requires confirmation — pass --yes to confirm non-interactively.",
             EXIT_CONFIG,
         )
-    if ans != target.name:
-        raise RepipeError("prod confirmation did not match — aborted.", EXIT_CONFIG)
+    if not ok:
+        raise RepipeError("prod trigger cancelled.", EXIT_CONFIG)
 
 
 def _finish_run(provider, target, ref, variables, args, confirmed=False) -> int:
@@ -906,13 +906,13 @@ def cmd_interactive(args) -> int:
     detach = getattr(args, "detach", False)
     if target.env == "prod" and not args.dry_run and not args.yes:
         if retry_on or max_retries:
-            force = interactive.confirm(
+            force = interactive.confirm_menu(
                 "Auto-retry this PROD run on transient failures?", default=force)
         # Prod deploys are long and often pause at a manual gate — the exact case
         # where you walk away. Offer to keep watching (and notify) in the
         # background so closing this terminal doesn't cost you the notification.
         if not detach:
-            detach = interactive.confirm(
+            detach = interactive.confirm_menu(
                 "Watch in the background? (notify even if you close this terminal)",
                 default=False)
     rargs = _run_args_namespace(

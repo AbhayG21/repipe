@@ -205,6 +205,19 @@ def ask(label, default=None, allow_back=True, step=None):
     return raw or (default or "")
 
 
+def confirm_menu(label, default=False, step=None) -> bool:
+    """Yes/No as an arrow-key menu rather than a typed y/N — for decisions taken
+    mid-flow, where reaching for a letter key breaks the ↑/↓/Enter rhythm of the
+    surrounding prompts. Degrades to the numbered picker when there's no TTY.
+
+    No BACK: these are asked after the wizard's step machine has finished, so
+    there is nowhere to go back to."""
+    options = [(True, "Yes"), (False, "No")]
+    sel = pick(label, options, default_idx=(0 if default else 1),
+               to_str=lambda o: o[1], allow_back=False, step=step)
+    return sel[0]
+
+
 def confirm(label, default=False) -> bool:
     hint = dim("[Y/n]" if default else "[y/N]")
     raw = _input(f"{cyan('?')} {bold(label)} {hint} ").strip().lower()
